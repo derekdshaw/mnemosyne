@@ -18,6 +18,16 @@ struct Cli {
     /// Print verbose output
     #[arg(long)]
     verbose: bool,
+
+    /// Ingest a specific session ID immediately (bypasses active-session mtime guard).
+    /// Used by SessionEnd hook to ingest the just-finished session.
+    #[arg(long)]
+    session_id: Option<String>,
+
+    /// Read session_id from stdin JSON (for use as a SessionEnd hook).
+    /// Claude Code pipes hook input JSON to stdin containing session_id.
+    #[arg(long)]
+    from_stdin: bool,
 }
 
 fn default_claude_dir() -> String {
@@ -34,7 +44,18 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // If --from-stdin, read session_id from the hook input JSON on stdin
+    if cli.from_stdin {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&input) {
+            if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
+                cli.session_id = Some(sid.to_string());
+            }
+        }
+    }
 
     if cli.verbose {
         tracing_subscriber::fmt()
@@ -69,7 +90,17 @@ fn run() -> Result<()> {
                 continue;
             }
 
-            match ingest_file(&conn, &path, cli.verbose) {
+            // If --session-id is set, only ingest that specific file
+            let force = cli.session_id.as_ref().map_or(false, |sid| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map_or(false, |stem| stem == sid)
+            });
+            if cli.session_id.is_some() && !force {
+                continue;
+            }
+
+            match ingest_file(&conn, &path, cli.verbose, force) {
                 Ok(IngestResult::Skipped) => {
                     if cli.verbose {
                         tracing::info!("skipped (unchanged): {}", path.display());
@@ -113,7 +144,7 @@ enum IngestResult {
     Ingested { messages: usize },
 }
 
-fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool) -> Result<IngestResult> {
+fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) -> Result<IngestResult> {
     let metadata = fs::metadata(path)?;
     let file_size = metadata.len() as i64;
     let file_mtime = metadata
@@ -123,11 +154,14 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool) -> Result<Inges
     let mtime_str = file_mtime.to_string();
 
     // Skip files modified in the last 60 seconds (likely active session)
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)?
-        .as_secs();
-    if now - file_mtime < 60 {
-        return Ok(IngestResult::SkippedActive);
+    // Unless force=true (SessionEnd hook for a specific session)
+    if !force {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs();
+        if now - file_mtime < 60 {
+            return Ok(IngestResult::SkippedActive);
+        }
     }
 
     let file_path_str = normalize_path(&path.to_string_lossy());
