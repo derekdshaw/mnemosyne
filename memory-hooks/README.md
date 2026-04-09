@@ -1,0 +1,108 @@
+# memory-hooks
+
+Single Rust binary with subcommands for Claude Code's real-time `PreToolUse` and `PostToolUse` hooks. Provides advisory warnings and session-level file tracking.
+
+## Purpose
+
+Claude Code spawns a new process for each hook event. This binary handles all four hook types via subcommands, keeping it to one compiled binary for fast startup. All hooks are **advisory only** — they always exit 0 and never block tool execution.
+
+## Architecture
+
+```
+main.rs
+├── CLI parsing (clap subcommands)
+├── Reads hook JSON from stdin
+├── Opens SQLite DB (shared with MCP server and ingester)
+├── Dispatches to subcommand handler
+└── Writes warnings to stderr (visible to Claude)
+
+pre_read.rs   — Anatomy lookup + repeated-read detection
+post_read.rs  — Record read in session_reads, update/create anatomy entry
+pre_write.rs  — Query bugs + do-not-repeat rules for the target file
+post_write.rs — Update anatomy write count and modification time
+```
+
+### Hook Input Format
+
+Each hook receives JSON on stdin from Claude Code:
+
+```json
+{
+  "session_id": "uuid-string",
+  "cwd": "D:/r/my_project",
+  "tool_name": "Read",
+  "tool_input": { "file_path": "D:/r/my_project/src/main.rs" },
+  "tool_response": { "content": "..." }
+}
+```
+
+`tool_response` is only present for `PostToolUse` hooks.
+
+### Subcommand Behavior
+
+**`pre-read`** — Runs before every file read:
+1. Looks up the file in `file_anatomy` → prints description and token estimate to stderr
+2. Checks `session_reads` for the current session → warns if file was already read
+
+**`post-read`** — Runs after every file read:
+1. Estimates tokens from response content (chars / 3.5)
+2. Inserts into `session_reads` (session tracking)
+3. Increments `file_anatomy.times_read` or creates a new anatomy entry
+
+**`pre-write`** — Runs before every file write/edit:
+1. Queries `bugs` table for the target file → warns about known bugs
+2. Queries `do_not_repeat` table for matching project/file rules → warns about things to avoid
+
+**`post-write`** — Runs after every file write/edit:
+1. Increments `file_anatomy.times_written` and updates `last_modified`
+2. Creates anatomy entry if file is new
+
+### Error Handling
+
+All errors are caught and printed to stderr. The process always exits 0 to avoid blocking Claude Code. If the database can't be opened (e.g., first run before ingester creates it), the hook exits silently.
+
+## Build
+
+```bash
+cargo build -p memory-hooks
+cargo build -p memory-hooks --release
+```
+
+## Test
+
+```bash
+# Test pre-read (should show repeated-read warning if file was read before)
+echo '{"session_id":"test","cwd":"D:/r/myproject","tool_name":"Read","tool_input":{"file_path":"D:/r/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- pre-read
+
+# Test post-read (records the read)
+echo '{"session_id":"test","cwd":"D:/r/myproject","tool_name":"Read","tool_input":{"file_path":"D:/r/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- post-read
+
+# Test pre-write (shows bugs and do-not-repeat warnings)
+echo '{"session_id":"test","cwd":"D:/r/myproject","tool_name":"Edit","tool_input":{"file_path":"D:/r/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- pre-write
+
+# Test post-write (updates anatomy)
+echo '{"session_id":"test","cwd":"D:/r/myproject","tool_name":"Edit","tool_input":{"file_path":"D:/r/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- post-write
+```
+
+## Configuration
+
+Register in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "D:/r/mnemosyne/target/release/memory-hooks.exe pre-read" }] },
+      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "D:/r/mnemosyne/target/release/memory-hooks.exe pre-write" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "D:/r/mnemosyne/target/release/memory-hooks.exe post-read" }] },
+      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "D:/r/mnemosyne/target/release/memory-hooks.exe post-write" }] }
+    ]
+  }
+}
+```
+
+### Performance
+
+Hooks run in the hot path of every file read/write. Current per-hook overhead on Windows is ~50-100ms (process spawn + SQLite open/query/close). See the plan document for pre-designed optimization paths (named-pipe daemon, MCP server reuse) if this becomes a bottleneck.

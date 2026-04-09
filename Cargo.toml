@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "memory-common",
+    "session-ingester",
+    "memory-mcp-server",
+    "memory-hooks",
+]
+resolver = "2"
