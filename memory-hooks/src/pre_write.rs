@@ -1,5 +1,5 @@
 use anyhow::Result;
-use memory_common::db::normalize_path;
+use memory_common::db::{normalize_path, truncate_utf8};
 use rusqlite::Connection;
 
 use crate::HookInput;
@@ -28,16 +28,9 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
         .collect();
 
     for (error_msg, fix_desc) in &bugs {
-        let error_short = if error_msg.len() > 100 {
-            format!("{}...", &error_msg[..100])
-        } else {
-            error_msg.clone()
-        };
-        let fix_short = if fix_desc.len() > 100 {
-            format!("{}...", &fix_desc[..100])
-        } else {
-            fix_desc.clone()
-        };
+        // C3: Use truncate_utf8 for safe multi-byte truncation
+        let error_short = truncate_utf8(error_msg, 100);
+        let fix_short = truncate_utf8(fix_desc, 100);
         eprintln!("\u{1f41b} Known bug on {filename}: {error_short} \u{2014} Fix: {fix_short}");
     }
 

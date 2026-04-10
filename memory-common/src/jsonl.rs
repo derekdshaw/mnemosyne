@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::db::truncate_utf8;
+
 /// A parsed JSONL transcript record.
 #[derive(Debug, Clone)]
 pub enum Record {
@@ -223,12 +225,7 @@ fn parse_content_block(b: &Value) -> Option<ContentBlock> {
         "thinking" => {
             // Extract only the thinking text, ignore the large signature field
             let thinking = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
-            // Truncate to 500 chars for storage
-            let truncated = if thinking.len() > 500 {
-                format!("{}...", &thinking[..500])
-            } else {
-                thinking.to_string()
-            };
+            let truncated = truncate_utf8(thinking, 500);
             Some(ContentBlock::Thinking(truncated))
         }
         "tool_use" => {
@@ -304,11 +301,7 @@ pub fn extract_tool_input_summary(tool_name: &str, input: &Value) -> Option<Stri
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max])
-    } else {
-        s.to_string()
-    }
+    truncate_utf8(s, max)
 }
 
 fn str_field(v: &Value, field: &str) -> String {

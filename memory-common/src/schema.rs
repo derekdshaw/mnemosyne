@@ -1,12 +1,6 @@
 /// All SQL DDL statements for the Mnemosyne database.
 /// Executed idempotently via CREATE IF NOT EXISTS.
-
-pub const PRAGMA_SETUP: &str = "\
-    PRAGMA journal_mode=WAL;\
-    PRAGMA busy_timeout=3000;\
-    PRAGMA synchronous=NORMAL;\
-    PRAGMA foreign_keys=ON;\
-";
+/// PRAGMAs are set procedurally in db.rs::setup_pragmas().
 
 pub const CREATE_INGESTION_LOG: &str = "\
     CREATE TABLE IF NOT EXISTS ingestion_log (\

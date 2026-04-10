@@ -6,7 +6,7 @@ mod post_write;
 use clap::{Parser, Subcommand};
 use memory_common::db;
 use serde::Deserialize;
-use std::io::Read;
+use std::io::Read as _;
 
 #[derive(Parser)]
 #[command(name = "memory-hooks", about = "Mnemosyne real-time hooks for Claude Code")]
@@ -58,9 +58,9 @@ impl HookInput {
 fn main() {
     let cli = Cli::parse();
 
-    // Read stdin JSON
+    // S10: Read stdin JSON with 1MB limit to prevent OOM from malicious input
     let mut input_str = String::new();
-    if let Err(e) = std::io::stdin().read_to_string(&mut input_str) {
+    if let Err(e) = std::io::stdin().take(1_048_576).read_to_string(&mut input_str) {
         eprintln!("mnemosyne: failed to read stdin: {e}");
         std::process::exit(0); // Never block — exit 0
     }

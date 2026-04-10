@@ -16,9 +16,25 @@ pub fn open_db() -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory: {}", parent.display()))?;
+        // S6: Verify DB parent is not a symlink
+        let meta = std::fs::symlink_metadata(parent)
+            .with_context(|| format!("failed to read metadata: {}", parent.display()))?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("database parent directory is a symlink: {}", parent.display());
+        }
     }
     let conn = Connection::open(&path)
         .with_context(|| format!("failed to open database: {}", path.display()))?;
+    // S7: Set restrictive permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(&path, perms);
+        }
+    }
     setup_pragmas(&conn)?;
     run_migrations(&conn)?;
     Ok(conn)
@@ -80,6 +96,19 @@ pub fn normalize_path(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+/// Truncate a string to at most `max` bytes, respecting UTF-8 char boundaries.
+/// Appends "..." if truncated. Never panics on multi-byte characters.
+pub fn truncate_utf8(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
 /// Derive a project name from a working directory path.
 /// Takes the last component of the path.
 pub fn project_from_cwd(cwd: &str) -> String {
@@ -136,6 +165,32 @@ mod tests {
     fn test_normalize_path() {
         assert_eq!(normalize_path(r"D:\r\git_dag_analyzer"), "D:/r/git_dag_analyzer");
         assert_eq!(normalize_path("D:/r/git_dag_analyzer"), "D:/r/git_dag_analyzer");
+    }
+
+    #[test]
+    fn test_truncate_utf8_ascii() {
+        assert_eq!(truncate_utf8("hello", 10), "hello");
+        assert_eq!(truncate_utf8("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_utf8_multibyte() {
+        // Each emoji is 4 bytes. "🎉🎊" = 8 bytes
+        let s = "🎉🎊🎈";  // 12 bytes
+        // Truncating at 5 should land inside the second emoji, back up to byte 4
+        assert_eq!(truncate_utf8(s, 5), "🎉...");
+        // Truncating at 8 should include two emojis
+        assert_eq!(truncate_utf8(s, 8), "🎉🎊...");
+        // Truncating at 12+ should return unchanged
+        assert_eq!(truncate_utf8(s, 12), "🎉🎊🎈");
+    }
+
+    #[test]
+    fn test_truncate_utf8_cjk() {
+        // CJK chars are 3 bytes each
+        let s = "你好世界"; // 12 bytes
+        assert_eq!(truncate_utf8(s, 6), "你好...");
+        assert_eq!(truncate_utf8(s, 7), "你好...");  // lands inside 世, backs up to 6
     }
 
     #[test]

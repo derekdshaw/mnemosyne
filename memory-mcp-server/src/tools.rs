@@ -77,6 +77,8 @@ pub struct LogBugInput {
     pub tags: Option<String>,
     /// File path where the bug was found
     pub file_path: Option<String>,
+    /// Project name
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]

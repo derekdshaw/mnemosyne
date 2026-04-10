@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use memory_common::db::{self, normalize_path, project_from_cwd};
+use memory_common::db::{self, normalize_path, project_from_cwd, truncate_utf8};
 use memory_common::jsonl::{self, ContentBlock, Record};
 use rusqlite::Connection;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -49,7 +49,7 @@ fn run() -> Result<()> {
     // If --from-stdin, read session_id from the hook input JSON on stdin
     if cli.from_stdin {
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).ok();
+        std::io::stdin().read_to_string(&mut input).ok();
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&input) {
             if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
                 cli.session_id = Some(sid.to_string());
@@ -68,7 +68,9 @@ fn run() -> Result<()> {
 
     let projects_dir = PathBuf::from(&cli.claude_dir).join("projects");
     if !projects_dir.exists() {
-        tracing::info!("no projects directory found at {}", projects_dir.display());
+        if cli.verbose {
+            eprintln!("mnemosyne: no projects directory found at {}", projects_dir.display());
+        }
         return Ok(());
     }
 
@@ -166,41 +168,34 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
 
     let file_path_str = normalize_path(&path.to_string_lossy());
 
-    // Check ingestion log
-    let existing: Option<(i64, String)> = conn
+    // Check ingestion log — C2: use line_count for incremental skip (not byte offset)
+    let existing: Option<(i64, String, i64)> = conn
         .query_row(
-            "SELECT file_size, file_mtime FROM ingestion_log WHERE file_path = ?1",
+            "SELECT file_size, file_mtime, line_count FROM ingestion_log WHERE file_path = ?1",
             [&file_path_str],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .ok();
 
-    if let Some((prev_size, prev_mtime)) = &existing {
+    if let Some((prev_size, prev_mtime, _)) = &existing {
         if *prev_size == file_size && *prev_mtime == mtime_str {
             return Ok(IngestResult::Skipped);
         }
     }
 
-    // Determine if we need full or incremental ingestion
-    let start_offset = match &existing {
-        Some((prev_size, _)) if *prev_size < file_size => *prev_size as u64,
-        Some(_) => 0, // File was rewritten, re-ingest from scratch
-        None => 0,
+    // C2: Determine how many lines to skip for incremental ingestion
+    // S9: TOCTOU accepted — file may change between metadata check and read.
+    // INSERT OR IGNORE on messages prevents data corruption from races.
+    let skip_lines = match &existing {
+        Some((prev_size, _, prev_lines)) if *prev_size < file_size => *prev_lines,
+        _ => 0, // New file or rewritten — ingest from scratch
     };
-
-    // If re-ingesting from scratch and we have prior data, clean it up
-    if start_offset == 0 && existing.is_some() {
-        // We'd need to delete old records for this file, but since records
-        // are keyed by session_id/uuid (not file), just re-ingest and let
-        // INSERT OR IGNORE handle duplicates.
-    }
 
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
 
     let mut line_count = 0i64;
     let mut message_count = 0usize;
-    let mut bytes_read = 0u64;
 
     // Track session metadata from first user message
     let mut session_meta: std::collections::HashMap<String, SessionMeta> =
@@ -211,17 +206,31 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
     // Defer foreign key checks until commit so we can insert messages before sessions
     tx.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
 
-    for line_result in reader.lines() {
-        let line = line_result?;
-        bytes_read += line.len() as u64 + 1; // +1 for newline
+    // S11: Bounded line reading — skip lines > 10MB
+    let mut line = String::new();
+    let mut buf_reader = BufReader::new(reader.into_inner());
+    loop {
+        line.clear();
+        let bytes = buf_reader.read_line(&mut line)?;
+        if bytes == 0 {
+            break; // EOF
+        }
         line_count += 1;
 
-        // Skip lines we've already ingested
-        if bytes_read <= start_offset {
+        // S11: Skip absurdly long lines to prevent OOM
+        if line.len() > 10_000_000 {
+            if verbose {
+                tracing::warn!("line {line_count}: skipped ({} bytes exceeds 10MB limit)", line.len());
+            }
             continue;
         }
 
-        let record = match jsonl::parse_line(&line) {
+        // C2: Skip lines already ingested
+        if line_count <= skip_lines {
+            continue;
+        }
+
+        let record = match jsonl::parse_line(line.trim()) {
             Ok(Some(r)) => r,
             Ok(None) => continue,
             Err(e) => {
@@ -266,9 +275,10 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
                     rusqlite::params![uuid, session_id, parent_uuid, content, timestamp],
                 )?;
 
-                // Insert into FTS
+                // C1: FTS5 has no unique constraints, so delete before insert to prevent duplicates
+                tx.execute("DELETE FROM messages_fts WHERE uuid = ?1", [&uuid])?;
                 tx.execute(
-                    "INSERT OR IGNORE INTO messages_fts (uuid, session_id, content) VALUES (?1, ?2, ?3)",
+                    "INSERT INTO messages_fts (uuid, session_id, content) VALUES (?1, ?2, ?3)",
                     rusqlite::params![uuid, session_id, content],
                 )?;
 
@@ -287,18 +297,21 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
                 }
 
                 // Store tool results as messages (content is the result text, truncated)
-                for result in &results {
-                    let content_truncated = if result.content.len() > 500 {
-                        format!("{}...", &result.content[..500])
+                // M5: Generate unique ID per tool result to avoid UUID collision
+                for (idx, result) in results.iter().enumerate() {
+                    let result_uuid = if results.len() > 1 {
+                        format!("{uuid}-tr{idx}")
                     } else {
-                        result.content.clone()
+                        uuid.clone()
                     };
+                    // C3: Use truncate_utf8 for safe multi-byte truncation
+                    let content_truncated = truncate_utf8(&result.content, 500);
 
                     tx.execute(
                         "INSERT OR IGNORE INTO messages (uuid, session_id, parent_uuid, role, content_type, content, tool_name, timestamp) \
                          VALUES (?1, ?2, ?3, 'user', 'tool_result', ?4, ?5, ?6)",
                         rusqlite::params![
-                            uuid,
+                            result_uuid,
                             session_id,
                             parent_uuid,
                             content_truncated,
@@ -363,10 +376,11 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
                     ],
                 )?;
 
-                // Insert text into FTS
+                // C1: FTS5 dedup — delete before insert
                 if let Some(ref text) = content_text {
+                    tx.execute("DELETE FROM messages_fts WHERE uuid = ?1", [&uuid])?;
                     tx.execute(
-                        "INSERT OR IGNORE INTO messages_fts (uuid, session_id, content) VALUES (?1, ?2, ?3)",
+                        "INSERT INTO messages_fts (uuid, session_id, content) VALUES (?1, ?2, ?3)",
                         rusqlite::params![uuid, session_id, text],
                     )?;
                 }

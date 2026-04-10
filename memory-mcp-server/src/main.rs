@@ -1,7 +1,7 @@
 mod tools;
 
 use anyhow::Result;
-use memory_common::db;
+use memory_common::db::{self, truncate_utf8};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::ServerInfo;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
@@ -9,7 +9,25 @@ use rusqlite::Connection;
 use std::sync::Mutex;
 use tools::*;
 
+/// S1: Escape FTS5 query to prevent operator abuse. Wraps in double quotes as a phrase.
+fn escape_fts_query(q: &str) -> String {
+    format!("\"{}\"", q.replace('"', "\"\""))
+}
+
+/// S2: Clamp limit to a safe range.
+fn clamp_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(10).clamp(1, 100)
+}
+
+/// S2: Clamp days to a safe range.
+fn clamp_days(days: Option<i64>) -> i64 {
+    days.unwrap_or(7).clamp(1, 365)
+}
+
 struct MnemosyneServer {
+    // S8: If a tool handler panics, Mutex becomes poisoned. All subsequent .lock() calls
+    // return PoisonError, which we map to MCP error responses — the server degrades
+    // gracefully rather than crashing, but DB operations stop working.
     db: Mutex<Connection>,
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
@@ -23,7 +41,7 @@ impl MnemosyneServer {
         Parameters(input): Parameters<SearchSessionsInput>,
     ) -> Result<Json<SessionResultList>, rmcp::ErrorData> {
         let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-        let limit = input.limit.unwrap_or(10);
+        let limit = clamp_limit(input.limit);
 
         let mut sql = String::from(
             "SELECT m.session_id, s.project, s.start_time, s.message_count, \
@@ -34,7 +52,7 @@ impl MnemosyneServer {
              JOIN sessions s ON m.session_id = s.session_id \
              WHERE messages_fts MATCH ?1"
         );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(input.query)];
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(escape_fts_query(&input.query))];
 
         if let Some(ref project) = input.project {
             sql.push_str(" AND s.project = ?2");
@@ -72,7 +90,7 @@ impl MnemosyneServer {
         Parameters(input): Parameters<GetRecentSessionsInput>,
     ) -> Result<Json<SessionResultList>, rmcp::ErrorData> {
         let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-        let days = input.days.unwrap_or(7);
+        let days = clamp_days(input.days);
 
         let mut sql = String::from(
             "SELECT session_id, project, start_time, message_count, \
@@ -203,21 +221,19 @@ impl MnemosyneServer {
              WHERE 1=1"
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        let mut idx = 1;
 
         if let Some(ref fp) = input.file_path {
-            sql.push_str(&format!(" AND tc.file_path LIKE ?{idx}"));
+            sql.push_str(&format!(" AND tc.file_path LIKE ?{}", params.len() + 1));
             params.push(Box::new(format!("%{fp}%")));
-            idx += 1;
         }
         if let Some(ref project) = input.project {
-            sql.push_str(&format!(" AND s.project = ?{idx}"));
+            sql.push_str(&format!(" AND s.project = ?{}", params.len() + 1));
             params.push(Box::new(project.clone()));
-            idx += 1;
         }
         if let Some(days) = input.days {
-            sql.push_str(&format!(" AND tc.timestamp >= datetime('now', ?{idx})"));
-            params.push(Box::new(format!("-{days} days")));
+            let d = days.clamp(1, 365);
+            sql.push_str(&format!(" AND tc.timestamp >= datetime('now', ?{})", params.len() + 1));
+            params.push(Box::new(format!("-{d} days")));
         }
         sql.push_str(" ORDER BY tc.timestamp DESC LIMIT 50");
 
@@ -247,18 +263,24 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<SaveContextInput>,
     ) -> Result<Json<SimpleResult>, rmcp::ErrorData> {
+        // S4: Validate and truncate input
+        if input.content.is_empty() {
+            return Err(rmcp::ErrorData::invalid_request("content must not be empty", None));
+        }
+        let content = truncate_utf8(&input.content, 10_000);
+
         let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         conn.execute(
             "INSERT INTO context_items (project, category, content, created_at) \
              VALUES (?1, ?2, ?3, datetime('now'))",
-            rusqlite::params![input.project, input.category, input.content],
+            rusqlite::params![input.project, input.category, content],
         )
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         let id = conn.last_insert_rowid();
         conn.execute(
             "INSERT INTO context_fts (item_id, project, category, content) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![id.to_string(), input.project, input.category, input.content],
+            rusqlite::params![id.to_string(), input.project, input.category, content],
         )
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
@@ -275,7 +297,7 @@ impl MnemosyneServer {
         Parameters(input): Parameters<SearchContextInput>,
     ) -> Result<Json<ContextItemList>, rmcp::ErrorData> {
         let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-        let limit = input.limit.unwrap_or(10);
+        let limit = clamp_limit(input.limit);
 
         let mut sql = String::from(
             "SELECT c.id, c.project, c.category, c.content, c.created_at \
@@ -283,7 +305,7 @@ impl MnemosyneServer {
              JOIN context_items c ON f.item_id = CAST(c.id AS TEXT) \
              WHERE context_fts MATCH ?1"
         );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(input.query)];
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(escape_fts_query(&input.query))];
 
         if let Some(ref category) = input.category {
             sql.push_str(" AND c.category = ?2");
@@ -415,16 +437,26 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<LogBugInput>,
     ) -> Result<Json<SimpleResult>, rmcp::ErrorData> {
+        // S4: Validate and truncate input
+        if input.error_message.is_empty() || input.fix_description.is_empty() {
+            return Err(rmcp::ErrorData::invalid_request("error_message and fix_description must not be empty", None));
+        }
+        let error_message = truncate_utf8(&input.error_message, 10_000);
+        let fix_description = truncate_utf8(&input.fix_description, 10_000);
+        let root_cause = input.root_cause.as_deref().map(|s| truncate_utf8(s, 10_000));
+
         let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let file_path = input.file_path.as_deref().map(db::normalize_path);
 
+        // M4: Use input.project instead of hardcoded NULL
         conn.execute(
             "INSERT INTO bugs (project, error_message, root_cause, fix_description, tags, file_path, created_at) \
-             VALUES (NULL, ?1, ?2, ?3, ?4, ?5, datetime('now'))",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
             rusqlite::params![
-                input.error_message,
-                input.root_cause,
-                input.fix_description,
+                input.project,
+                error_message,
+                root_cause,
+                fix_description,
                 input.tags,
                 file_path,
             ],
@@ -434,13 +466,14 @@ impl MnemosyneServer {
         let id = conn.last_insert_rowid();
         conn.execute(
             "INSERT INTO bugs_fts (bug_id, project, file_path, error_message, root_cause, fix_description) \
-             VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 id.to_string(),
+                input.project,
                 file_path,
-                input.error_message,
-                input.root_cause,
-                input.fix_description,
+                error_message,
+                root_cause,
+                fix_description,
             ],
         )
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
@@ -465,11 +498,18 @@ impl MnemosyneServer {
              JOIN bugs b ON f.bug_id = CAST(b.id AS TEXT) \
              WHERE bugs_fts MATCH ?1"
         );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(input.query)];
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(escape_fts_query(&input.query))];
 
         if let Some(ref project) = input.project {
             sql.push_str(&format!(" AND b.project = ?{}", params.len() + 1));
             params.push(Box::new(project.clone()));
+        }
+        // M6: Filter by tags if provided
+        if let Some(ref tags) = input.tags {
+            for tag in tags.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()) {
+                sql.push_str(&format!(" AND b.tags LIKE ?{}", params.len() + 1));
+                params.push(Box::new(format!("%{tag}%")));
+            }
         }
         sql.push_str(" ORDER BY b.created_at DESC LIMIT 20");
 
@@ -500,13 +540,20 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<AddDoNotRepeatInput>,
     ) -> Result<Json<SimpleResult>, rmcp::ErrorData> {
+        // S4: Validate and truncate input
+        if input.rule.is_empty() {
+            return Err(rmcp::ErrorData::invalid_request("rule must not be empty", None));
+        }
+        let rule = truncate_utf8(&input.rule, 10_000);
+        let reason = input.reason.as_deref().map(|s| truncate_utf8(s, 10_000));
+
         let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let file_path = input.file_path.as_deref().map(db::normalize_path);
 
         conn.execute(
             "INSERT INTO do_not_repeat (project, rule, reason, file_path, created_at) \
              VALUES (?1, ?2, ?3, ?4, datetime('now'))",
-            rusqlite::params![input.project, input.rule, input.reason, file_path],
+            rusqlite::params![input.project, rule, reason, file_path],
         )
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
@@ -518,8 +565,8 @@ impl MnemosyneServer {
                 id.to_string(),
                 input.project,
                 file_path,
-                input.rule,
-                input.reason,
+                rule,
+                reason,
             ],
         )
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
@@ -542,18 +589,16 @@ impl MnemosyneServer {
             "SELECT id, rule, reason, file_path, created_at FROM do_not_repeat WHERE 1=1"
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        let mut idx = 1;
 
         if let Some(ref project) = input.project {
-            sql.push_str(&format!(" AND project = ?{idx}"));
+            sql.push_str(&format!(" AND project = ?{}", params.len() + 1));
             params.push(Box::new(project.clone()));
-            idx += 1;
         }
         if let Some(ref fp) = input.file_path {
-            sql.push_str(&format!(" AND (file_path = ?{idx} OR file_path IS NULL)"));
+            sql.push_str(&format!(" AND (file_path = ?{} OR file_path IS NULL)", params.len() + 1));
             params.push(Box::new(db::normalize_path(fp)));
         }
-        sql.push_str(" ORDER BY created_at DESC");
+        sql.push_str(" ORDER BY created_at DESC LIMIT 100");
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;

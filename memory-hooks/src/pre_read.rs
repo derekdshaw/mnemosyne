@@ -13,18 +13,20 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
 
     // Check file anatomy
     if let Some(ref proj) = project {
-        let anatomy: Option<(String, i64)> = conn
+        // M7: Use Option<i64> for estimated_tokens which may be NULL
+        let anatomy: Option<(String, Option<i64>)> = conn
             .query_row(
                 "SELECT description, estimated_tokens FROM file_anatomy \
                  WHERE project = ?1 AND file_path = ?2",
                 rusqlite::params![proj, file_path],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
             .ok();
 
         if let Some((description, tokens)) = anatomy {
             let filename = file_path.rsplit('/').next().unwrap_or(&file_path);
-            eprintln!("\u{1f4c4} {filename}: {description} (~{tokens} tokens)");
+            let token_info = tokens.map(|t| format!(" (~{t} tokens)")).unwrap_or_default();
+            eprintln!("\u{1f4c4} {filename}: {description}{token_info}");
         }
     }
 
