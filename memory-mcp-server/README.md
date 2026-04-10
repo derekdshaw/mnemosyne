@@ -74,7 +74,7 @@ Register in `~/.claude/settings.json`:
 {
   "mcpServers": {
     "memory": {
-      "command": "D:/r/mnemosyne/target/release/memory-mcp-server.exe",
+      "command": "/absolute/path/to/memory-mcp-server",
       "args": []
     }
   }

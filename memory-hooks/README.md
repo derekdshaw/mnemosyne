@@ -29,9 +29,9 @@ Each hook receives JSON on stdin from Claude Code:
 ```json
 {
   "session_id": "uuid-string",
-  "cwd": "D:/r/my_project",
+  "cwd": "/home/user/my_project",
   "tool_name": "Read",
-  "tool_input": { "file_path": "D:/r/my_project/src/main.rs" },
+  "tool_input": { "file_path": "/home/user/my_project/src/main.rs" },
   "tool_response": { "content": "..." }
 }
 ```
@@ -72,16 +72,16 @@ cargo build -p memory-hooks --release
 
 ```bash
 # Test pre-read (should show repeated-read warning if file was read before)
-echo '{"session_id":"test","cwd":"D:/r/myproject","tool_name":"Read","tool_input":{"file_path":"D:/r/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- pre-read
+echo '{"session_id":"test","cwd":"/home/user/myproject","tool_name":"Read","tool_input":{"file_path":"/home/user/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- pre-read
 
 # Test post-read (records the read)
-echo '{"session_id":"test","cwd":"D:/r/myproject","tool_name":"Read","tool_input":{"file_path":"D:/r/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- post-read
+echo '{"session_id":"test","cwd":"/home/user/myproject","tool_name":"Read","tool_input":{"file_path":"/home/user/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- post-read
 
 # Test pre-write (shows bugs and do-not-repeat warnings)
-echo '{"session_id":"test","cwd":"D:/r/myproject","tool_name":"Edit","tool_input":{"file_path":"D:/r/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- pre-write
+echo '{"session_id":"test","cwd":"/home/user/myproject","tool_name":"Edit","tool_input":{"file_path":"/home/user/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- pre-write
 
 # Test post-write (updates anatomy)
-echo '{"session_id":"test","cwd":"D:/r/myproject","tool_name":"Edit","tool_input":{"file_path":"D:/r/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- post-write
+echo '{"session_id":"test","cwd":"/home/user/myproject","tool_name":"Edit","tool_input":{"file_path":"/home/user/myproject/src/main.rs"}}' | cargo run -p memory-hooks -- post-write
 ```
 
 ## Configuration
@@ -92,12 +92,12 @@ Register in `~/.claude/settings.json`:
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "Read", "hooks": [{ "type": "command", "command": "D:/r/mnemosyne/target/release/memory-hooks.exe pre-read" }] },
-      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "D:/r/mnemosyne/target/release/memory-hooks.exe pre-write" }] }
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "/absolute/path/to/memory-hooks pre-read" }] },
+      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "/absolute/path/to/memory-hooks pre-write" }] }
     ],
     "PostToolUse": [
-      { "matcher": "Read", "hooks": [{ "type": "command", "command": "D:/r/mnemosyne/target/release/memory-hooks.exe post-read" }] },
-      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "D:/r/mnemosyne/target/release/memory-hooks.exe post-write" }] }
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "/absolute/path/to/memory-hooks post-read" }] },
+      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "/absolute/path/to/memory-hooks post-write" }] }
     ]
   }
 }
@@ -105,4 +105,4 @@ Register in `~/.claude/settings.json`:
 
 ### Performance
 
-Hooks run in the hot path of every file read/write. Current per-hook overhead on Windows is ~50-100ms (process spawn + SQLite open/query/close). See the plan document for pre-designed optimization paths (named-pipe daemon, MCP server reuse) if this becomes a bottleneck.
+Hooks run in the hot path of every file read/write. Per-hook overhead is typically 50-100ms (process spawn + SQLite open/query/close). See the plan document for pre-designed optimization paths (named-pipe daemon, MCP server reuse) if this becomes a bottleneck.

@@ -44,9 +44,9 @@ Mnemosyne gives Claude Code persistent, queryable memory across sessions by inge
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | [memory-common](memory-common/) | (library) | Shared SQLite schema, JSONL parser, data models, path utilities |
-| [session-ingester](session-ingester/) | `session-ingester.exe` | CLI that scans and ingests JSONL transcripts into SQLite |
-| [memory-mcp-server](memory-mcp-server/) | `memory-mcp-server.exe` | MCP server exposing 11 query/write tools over stdio |
-| [memory-hooks](memory-hooks/) | `memory-hooks.exe` | Real-time hook handlers for pre/post read/write events |
+| [session-ingester](session-ingester/) | `session-ingester` | CLI that scans and ingests JSONL transcripts into SQLite |
+| [memory-mcp-server](memory-mcp-server/) | `memory-mcp-server` | MCP server exposing 11 query/write tools over stdio |
+| [memory-hooks](memory-hooks/) | `memory-hooks` | Real-time hook handlers for pre/post read/write events |
 
 ---
 
@@ -56,18 +56,19 @@ Mnemosyne gives Claude Code persistent, queryable memory across sessions by inge
 
 - Rust toolchain (1.70+): https://rustup.rs
 - Claude Code CLI
+- SQLite is statically linked into the binaries — no system SQLite installation required
 
 ### Build
 
 ```bash
-cd D:/r/mnemosyne
+cd /path/to/mnemosyne
 cargo build --release
 ```
 
 Binaries are output to `target/release/`:
-- `session-ingester.exe`
-- `memory-mcp-server.exe`
-- `memory-hooks.exe`
+- `session-ingester`
+- `memory-mcp-server`
+- `memory-hooks`
 
 ### Register the MCP Server
 
@@ -77,7 +78,7 @@ Create or edit `~/.claude/.mcp.json`:
 {
   "mcpServers": {
     "mnemosyne": {
-      "command": "D:/r/mnemosyne/target/release/memory-mcp-server.exe",
+      "command": "/absolute/path/to/mnemosyne/target/release/memory-mcp-server",
       "args": []
     }
   }
@@ -95,14 +96,14 @@ Add to `~/.claude/settings.json` (merge with existing settings):
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "D:/r/mnemosyne/target/release/session-ingester.exe"
+        "command": "/absolute/path/to/mnemosyne/target/release/session-ingester"
       }]
     }],
     "SessionEnd": [{
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "D:/r/mnemosyne/target/release/session-ingester.exe --from-stdin"
+        "command": "/absolute/path/to/mnemosyne/target/release/session-ingester --from-stdin"
       }]
     }],
     "PreToolUse": [
@@ -110,14 +111,14 @@ Add to `~/.claude/settings.json` (merge with existing settings):
         "matcher": "Read",
         "hooks": [{
           "type": "command",
-          "command": "D:/r/mnemosyne/target/release/memory-hooks.exe pre-read"
+          "command": "/absolute/path/to/mnemosyne/target/release/memory-hooks pre-read"
         }]
       },
       {
         "matcher": "Write|Edit",
         "hooks": [{
           "type": "command",
-          "command": "D:/r/mnemosyne/target/release/memory-hooks.exe pre-write"
+          "command": "/absolute/path/to/mnemosyne/target/release/memory-hooks pre-write"
         }]
       }
     ],
@@ -126,14 +127,14 @@ Add to `~/.claude/settings.json` (merge with existing settings):
         "matcher": "Read",
         "hooks": [{
           "type": "command",
-          "command": "D:/r/mnemosyne/target/release/memory-hooks.exe post-read"
+          "command": "/absolute/path/to/mnemosyne/target/release/memory-hooks post-read"
         }]
       },
       {
         "matcher": "Write|Edit",
         "hooks": [{
           "type": "command",
-          "command": "D:/r/mnemosyne/target/release/memory-hooks.exe post-write"
+          "command": "/absolute/path/to/mnemosyne/target/release/memory-hooks post-write"
         }]
       }
     ]
@@ -141,7 +142,7 @@ Add to `~/.claude/settings.json` (merge with existing settings):
 }
 ```
 
-Adjust all paths to match your system. Use absolute paths with forward slashes on Windows (`D:/r/...` not `D:\r\...`).
+Replace `/absolute/path/to/mnemosyne` with the actual path where you cloned and built the project. Paths must be absolute. On Windows, use forward slashes (`C:/Users/me/mnemosyne/...`).
 
 ### Seed the Database
 
@@ -156,11 +157,12 @@ After this, the SessionStart and SessionEnd hooks will keep the database up to d
 ### Verify
 
 ```bash
-# Check the database
-sqlite3 ~/.claude/memory/memory.db "SELECT count(*) FROM messages; SELECT count(*) FROM sessions;"
-
-# Run the test suite
+# Run the test suite (no external dependencies needed)
 cargo test
+
+# Optionally inspect the database directly using the sqlite3 CLI.
+# Install from: https://www.sqlite.org/download.html
+sqlite3 ~/.claude/memory/memory.db "SELECT count(*) FROM messages; SELECT count(*) FROM sessions;"
 ```
 
 ---

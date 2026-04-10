@@ -10,7 +10,7 @@ This crate is the foundation layer. It owns:
 - **Schema definitions** — All 12 tables and 4 FTS5 virtual tables as SQL constants
 - **JSONL parser** — Streaming parser for Claude Code's transcript format (`~/.claude/projects/*/*.jsonl`)
 - **Data models** — Rust structs for all database entities
-- **Path utilities** — Normalizing Windows backslash paths, deriving project names from working directories
+- **Path utilities** — Normalizing file paths to forward slashes for consistent cross-platform storage, deriving project names from working directories
 
 ## Architecture
 
