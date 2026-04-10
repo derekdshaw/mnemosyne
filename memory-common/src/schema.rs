@@ -46,8 +46,8 @@ pub const CREATE_MESSAGES_INDEX: &str = "\
 
 pub const CREATE_MESSAGES_FTS: &str = "\
     CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(\
-        uuid ,\
-        session_id ,\
+        uuid UNINDEXED,\
+        session_id UNINDEXED,\
         content\
     );\
 ";
@@ -94,9 +94,9 @@ pub const CREATE_CONTEXT_ITEMS: &str = "\
 
 pub const CREATE_CONTEXT_FTS: &str = "\
     CREATE VIRTUAL TABLE IF NOT EXISTS context_fts USING fts5(\
-        item_id ,\
-        project ,\
-        category ,\
+        item_id UNINDEXED,\
+        project UNINDEXED,\
+        category UNINDEXED,\
         content\
     );\
 ";
@@ -117,9 +117,9 @@ pub const CREATE_BUGS: &str = "\
 
 pub const CREATE_BUGS_FTS: &str = "\
     CREATE VIRTUAL TABLE IF NOT EXISTS bugs_fts USING fts5(\
-        bug_id ,\
-        project ,\
-        file_path ,\
+        bug_id UNINDEXED,\
+        project UNINDEXED,\
+        file_path UNINDEXED,\
         error_message, root_cause, fix_description\
     );\
 ";
@@ -166,9 +166,9 @@ pub const CREATE_DO_NOT_REPEAT: &str = "\
 
 pub const CREATE_DO_NOT_REPEAT_FTS: &str = "\
     CREATE VIRTUAL TABLE IF NOT EXISTS do_not_repeat_fts USING fts5(\
-        dnr_id ,\
-        project ,\
-        file_path ,\
+        dnr_id UNINDEXED,\
+        project UNINDEXED,\
+        file_path UNINDEXED,\
         rule, reason\
     );\
 ";

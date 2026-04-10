@@ -78,7 +78,7 @@ impl MnemosyneServer {
         let mut sql = String::from(
             "SELECT m.session_id, s.project, s.start_time, s.message_count, \
              s.total_input_tokens, s.total_output_tokens, \
-             snippet(messages_fts, 2, '>>>', '<<<', '...', 64) as excerpt \
+             snippet(messages_fts, -1, '>>>', '<<<', '...', 64) as excerpt \
              FROM messages_fts \
              JOIN messages m ON messages_fts.uuid = m.uuid \
              JOIN sessions s ON m.session_id = s.session_id \
