@@ -163,7 +163,7 @@ mod tests {
         assert!(tables.contains(&"messages_fts".to_string()));
         assert!(tables.contains(&"context_fts".to_string()));
         assert!(tables.contains(&"bugs_fts".to_string()));
-        assert!(tables.contains(&"do_not_repeat_fts".to_string()));
+        // do_not_repeat has no FTS table (exact match only, not free-text search)
     }
 
     #[test]

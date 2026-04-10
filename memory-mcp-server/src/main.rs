@@ -585,6 +585,8 @@ impl MnemosyneServer {
         let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let file_path = input.file_path.as_deref().map(db::normalize_path);
 
+        // No FTS table for do_not_repeat — rules are few per project and retrieved
+        // by exact project/file match, not free-text search.
         conn.execute(
             "INSERT INTO do_not_repeat (project, rule, reason, file_path, created_at) \
              VALUES (?1, ?2, ?3, ?4, datetime('now'))",
@@ -593,19 +595,6 @@ impl MnemosyneServer {
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         let id = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO do_not_repeat_fts (dnr_id, project, file_path, rule, reason) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                id.to_string(),
-                input.project,
-                file_path,
-                rule,
-                reason,
-            ],
-        )
-        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
         Ok(Json(SimpleResult {
             success: true,
             message: format!("Do-not-repeat rule added (id: {id})"),
@@ -620,22 +609,20 @@ impl MnemosyneServer {
     ) -> Result<Json<DoNotRepeatList>, rmcp::ErrorData> {
         let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let mut sql = String::from(
-            "SELECT id, rule, reason, file_path, created_at FROM do_not_repeat WHERE 1=1"
-        );
-        let mut params: Vec<Param> = Vec::new();
+        // Static query with nullable params — NULL means "no filter".
+        // file_path filter also includes rules with NULL file_path (global rules).
+        let file_path = input.file_path.as_deref().map(db::normalize_path);
+        let params = [
+            Param::Text(input.project.clone().unwrap_or_default()),
+            Param::Text(file_path.unwrap_or_default()),
+        ];
 
-        if let Some(ref project) = input.project {
-            sql.push_str(&format!(" AND project = ?{}", params.len() + 1));
-            params.push(Param::Text(project.clone()));
-        }
-        if let Some(ref fp) = input.file_path {
-            sql.push_str(&format!(" AND (file_path = ?{} OR file_path IS NULL)", params.len() + 1));
-            params.push(Param::Text(db::normalize_path(fp)));
-        }
-        sql.push_str(" ORDER BY created_at DESC LIMIT 100");
+        let sql = "SELECT id, rule, reason, file_path, created_at FROM do_not_repeat \
+                   WHERE (?1 = '' OR project = ?1) \
+                   AND (?2 = '' OR file_path = ?2 OR file_path IS NULL) \
+                   ORDER BY created_at DESC LIMIT 100";
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn.prepare(sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
             .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(DoNotRepeatResult {

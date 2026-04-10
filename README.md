@@ -150,7 +150,7 @@ SQLite database is stored at `~/.claude/memory/memory.db` with WAL mode enabled 
 **Context tables** (read-write via MCP tools):
 - `context_items` — Saved knowledge with categories, searchable via `context_fts`
 - `bugs` — Logged bugs with error messages and fixes, searchable via `bugs_fts`
-- `do_not_repeat` — Rules for mistakes to avoid, searchable via `do_not_repeat_fts`
+- `do_not_repeat` — Rules for mistakes to avoid, queried by exact project/file match
 
 **Hook tables** (populated by real-time hooks):
 - `file_anatomy` — Per-project file index with descriptions and token estimates

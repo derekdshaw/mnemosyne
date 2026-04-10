@@ -164,13 +164,8 @@ pub const CREATE_DO_NOT_REPEAT: &str = "\
     );\
 ";
 
-pub const CREATE_DO_NOT_REPEAT_FTS: &str = "\
-    CREATE VIRTUAL TABLE IF NOT EXISTS do_not_repeat_fts USING fts5(\
-        dnr_id UNINDEXED,\
-        project UNINDEXED,\
-        file_path UNINDEXED,\
-        rule, reason\
-    );\
+pub const CREATE_DO_NOT_REPEAT_INDEX: &str = "\
+    CREATE INDEX IF NOT EXISTS idx_do_not_repeat_project ON do_not_repeat(project);\
 ";
 
 /// All migration statements in order.
@@ -187,15 +182,17 @@ pub const ALL_MIGRATIONS: &[&str] = &[
     CREATE_SESSION_READS,
     CREATE_SESSION_READS_INDEX,
     CREATE_DO_NOT_REPEAT,
+    CREATE_DO_NOT_REPEAT_INDEX,
 ];
 
 /// FTS tables must be created separately (they fail if re-created when they already exist
 /// even with IF NOT EXISTS in some SQLite versions, so we check first).
+/// Note: do_not_repeat has no FTS table — rules are retrieved by exact project/file match,
+/// not free-text search. The table is small (tens of rules) so FTS adds no value.
 pub const FTS_MIGRATIONS: &[(&str, &str)] = &[
     ("messages_fts", CREATE_MESSAGES_FTS),
     ("context_fts", CREATE_CONTEXT_FTS),
     ("bugs_fts", CREATE_BUGS_FTS),
-    ("do_not_repeat_fts", CREATE_DO_NOT_REPEAT_FTS),
 ];
 
 /// Index migrations that use multi-statement strings.
