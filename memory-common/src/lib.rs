@@ -1,3 +1,4 @@
+pub mod anatomy;
 pub mod db;
 pub mod jsonl;
 pub mod models;

@@ -173,9 +173,9 @@ sqlite3 ~/.claude/memory/memory.db "SELECT count(*) FROM messages; SELECT count(
 
 These happen automatically without any action from the user:
 
-**Session start** — The ingester runs and processes any new transcripts from completed sessions. Other running agents immediately see data from sessions that have ended.
+**Session start** — The ingester runs and processes any new transcripts from completed sessions. This populates the `sessions`, `messages`, `tool_calls`, and `token_usage` tables — making past conversations, tool invocations (with file paths), and token stats queryable by tools like `search_sessions`, `get_file_history`, and `get_session_detail`.
 
-**Session end** — The ingester runs again with `--from-stdin`, immediately ingesting the just-finished session's transcript so other concurrent agents can access it.
+**Session end** — The ingester runs again with `--from-stdin`, immediately ingesting the just-finished session's transcript so other concurrent agents can access it without waiting for a new session to start.
 
 **Reading a file** — The pre-read hook checks the file anatomy index and warns if the file was already read this session:
 ```
