@@ -68,6 +68,13 @@ impl MnemosyneServer {
         let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let limit = clamp_limit(input.limit);
 
+        // FTS5's snippet() requires the FTS table to be directly in the FROM clause
+        // with an active MATCH context. GROUP BY breaks this context, causing
+        // "unable to use function snippet in the requested context" errors.
+        //
+        // Instead of GROUP BY, we return one row per matching message (which may
+        // yield multiple rows per session) and dedup by session_id in Rust.
+        // This keeps snippet() working with a single efficient FTS scan.
         let mut sql = String::from(
             "SELECT m.session_id, s.project, s.start_time, s.message_count, \
              s.total_input_tokens, s.total_output_tokens, \
@@ -84,11 +91,12 @@ impl MnemosyneServer {
             params.push(Param::Text(project.clone()));
         }
 
-        sql.push_str(" GROUP BY m.session_id ORDER BY s.start_time DESC");
-        sql.push_str(&format!(" LIMIT {limit}"));
+        sql.push_str(" ORDER BY s.start_time DESC");
+        // Over-fetch to account for dedup — we'll trim to limit after
+        sql.push_str(&format!(" LIMIT {}", limit * 5));
 
         let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-        let results = stmt
+        let all_rows: Vec<SessionResult> = stmt
             .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(SessionResult {
                     session_id: row.get(0)?,
@@ -102,6 +110,14 @@ impl MnemosyneServer {
             })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
             .filter_map(|r| r.ok())
+            .collect();
+
+        // Dedup: keep the first (best) match per session
+        let mut seen = std::collections::HashSet::new();
+        let results: Vec<SessionResult> = all_rows
+            .into_iter()
+            .filter(|r| seen.insert(r.session_id.clone()))
+            .take(limit as usize)
             .collect();
 
         Ok(Json(SessionResultList { results }))
@@ -651,6 +667,14 @@ impl ServerHandler for MnemosyneServer {
 }
 
 impl MnemosyneServer {
+    #[cfg(test)]
+    fn new_with_conn(conn: Connection) -> Self {
+        Self {
+            db: Mutex::new(conn),
+            tool_router: Self::tool_router(),
+        }
+    }
+
     fn new() -> Result<Self> {
         let conn = db::open_db()?;
         Ok(Self {
@@ -682,4 +706,321 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("MCP service error: {e}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::handler::server::wrapper::Parameters;
+    use rusqlite::types::ToSql;
+
+    fn test_server() -> MnemosyneServer {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        MnemosyneServer::new_with_conn(conn)
+    }
+
+    // --- Group 2: Helper function tests ---
+
+    #[test]
+    fn test_escape_fts_query() {
+        assert_eq!(escape_fts_query("hello"), "\"hello\"");
+        assert_eq!(escape_fts_query("a\"b"), "\"a\"\"b\"");
+        assert_eq!(escape_fts_query("*"), "\"*\"");
+        assert_eq!(escape_fts_query("content:secret"), "\"content:secret\"");
+    }
+
+    #[test]
+    fn test_clamp_limit() {
+        assert_eq!(clamp_limit(None), 10);
+        assert_eq!(clamp_limit(Some(0)), 1);
+        assert_eq!(clamp_limit(Some(200)), 100);
+        assert_eq!(clamp_limit(Some(50)), 50);
+        assert_eq!(clamp_limit(Some(-5)), 1);
+    }
+
+    #[test]
+    fn test_clamp_days() {
+        assert_eq!(clamp_days(None), 7);
+        assert_eq!(clamp_days(Some(-5)), 1);
+        assert_eq!(clamp_days(Some(1000)), 365);
+        assert_eq!(clamp_days(Some(30)), 30);
+    }
+
+    #[test]
+    fn test_param_to_sql() {
+        let text = Param::Text("hello".to_string());
+        let int = Param::Int(42);
+        // Verify they produce valid ToSqlOutput without panicking
+        text.to_sql().expect("Text param should convert");
+        int.to_sql().expect("Int param should convert");
+    }
+
+    // --- Group 4: MCP tool handler tests ---
+
+    #[test]
+    fn test_save_context_and_search() {
+        let server = test_server();
+        let save_result = server.save_context(Parameters(SaveContextInput {
+            content: "Arena allocators prevent drop-time regression".to_string(),
+            category: "architecture".to_string(),
+            project: Some("test_proj".to_string()),
+        }));
+        assert!(save_result.is_ok());
+
+        let search_result = server.search_context(Parameters(SearchContextInput {
+            query: "arena allocators".to_string(),
+            category: None,
+            project: None,
+            limit: None,
+        }));
+        let Json(list) = search_result.unwrap();
+        assert_eq!(list.results.len(), 1);
+        assert!(list.results[0].content.contains("Arena allocators"));
+    }
+
+    #[test]
+    fn test_save_context_empty_rejected() {
+        let server = test_server();
+        let result = server.save_context(Parameters(SaveContextInput {
+            content: "".to_string(),
+            category: "test".to_string(),
+            project: None,
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_context_truncation() {
+        let server = test_server();
+        let long_content = "x".repeat(20_000);
+        let result = server.save_context(Parameters(SaveContextInput {
+            content: long_content,
+            category: "test".to_string(),
+            project: None,
+        }));
+        assert!(result.is_ok());
+
+        // Verify stored content is truncated
+        let conn = server.db.lock().unwrap();
+        let stored: String = conn.query_row(
+            "SELECT content FROM context_items LIMIT 1", [], |r| r.get(0),
+        ).unwrap();
+        assert!(stored.len() <= 10_004); // 10000 + "..."
+        assert!(stored.ends_with("..."));
+    }
+
+    #[test]
+    fn test_log_bug_and_search() {
+        let server = test_server();
+        let log_result = server.log_bug(Parameters(LogBugInput {
+            error_message: "index out of bounds".to_string(),
+            fix_description: "check array length first".to_string(),
+            root_cause: Some("missing bounds check".to_string()),
+            tags: Some("safety".to_string()),
+            file_path: Some("src/main.rs".to_string()),
+            project: Some("test_proj".to_string()),
+        }));
+        assert!(log_result.is_ok());
+
+        let search_result = server.search_bugs(Parameters(SearchBugsInput {
+            query: "index out of bounds".to_string(),
+            tags: None,
+            project: None,
+        }));
+        let Json(list) = search_result.unwrap();
+        assert_eq!(list.results.len(), 1);
+        assert_eq!(list.results[0].error_message, "index out of bounds");
+    }
+
+    #[test]
+    fn test_log_bug_with_tags_filter() {
+        let server = test_server();
+        server.log_bug(Parameters(LogBugInput {
+            error_message: "perf regression".to_string(),
+            fix_description: "use arena".to_string(),
+            root_cause: None,
+            tags: Some("perf,memory".to_string()),
+            file_path: None,
+            project: None,
+        })).unwrap();
+
+        let result = server.search_bugs(Parameters(SearchBugsInput {
+            query: "regression".to_string(),
+            tags: Some("perf".to_string()),
+            project: None,
+        }));
+        let Json(list) = result.unwrap();
+        assert_eq!(list.results.len(), 1);
+    }
+
+    #[test]
+    fn test_log_bug_empty_rejected() {
+        let server = test_server();
+        let result = server.log_bug(Parameters(LogBugInput {
+            error_message: "".to_string(),
+            fix_description: "some fix".to_string(),
+            root_cause: None, tags: None, file_path: None, project: None,
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_and_get_do_not_repeat() {
+        let server = test_server();
+        server.add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+            rule: "Don't use individual Vec<u8>".to_string(),
+            reason: Some("causes drop-time regression".to_string()),
+            project: Some("test_proj".to_string()),
+            file_path: None,
+        })).unwrap();
+
+        let Json(list) = server.get_do_not_repeat(Parameters(GetDoNotRepeatInput {
+            project: Some("test_proj".to_string()),
+            file_path: None,
+        })).unwrap();
+        assert_eq!(list.results.len(), 1);
+        assert!(list.results[0].rule.contains("Vec<u8>"));
+    }
+
+    #[test]
+    fn test_get_do_not_repeat_file_filter() {
+        let server = test_server();
+        // Global rule (no file_path)
+        server.add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+            rule: "global rule".to_string(),
+            reason: None,
+            project: Some("proj".to_string()),
+            file_path: None,
+        })).unwrap();
+        // Scoped rule
+        server.add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+            rule: "scoped rule".to_string(),
+            reason: None,
+            project: Some("proj".to_string()),
+            file_path: Some("src/main.rs".to_string()),
+        })).unwrap();
+
+        let Json(list) = server.get_do_not_repeat(Parameters(GetDoNotRepeatInput {
+            project: Some("proj".to_string()),
+            file_path: Some("src/main.rs".to_string()),
+        })).unwrap();
+        // Should return both global (file_path IS NULL) and scoped rules
+        assert_eq!(list.results.len(), 2);
+    }
+
+    #[test]
+    fn test_get_project_summary_empty() {
+        let server = test_server();
+        let Json(summary) = server.get_project_summary(Parameters(GetProjectSummaryInput {
+            project: Some("nonexistent".to_string()),
+        })).unwrap();
+        assert!(summary.context_items.is_empty());
+        assert!(summary.recent_bugs.is_empty());
+        assert!(summary.do_not_repeat.is_empty());
+        assert_eq!(summary.total_sessions, 0);
+    }
+
+    #[test]
+    fn test_get_project_summary_with_data() {
+        let server = test_server();
+        server.save_context(Parameters(SaveContextInput {
+            content: "test context".to_string(),
+            category: "arch".to_string(),
+            project: Some("proj".to_string()),
+        })).unwrap();
+        server.log_bug(Parameters(LogBugInput {
+            error_message: "test bug".to_string(),
+            fix_description: "test fix".to_string(),
+            root_cause: None, tags: None, file_path: None,
+            project: Some("proj".to_string()),
+        })).unwrap();
+        server.add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+            rule: "test rule".to_string(),
+            reason: None,
+            project: Some("proj".to_string()),
+            file_path: None,
+        })).unwrap();
+
+        let Json(summary) = server.get_project_summary(Parameters(GetProjectSummaryInput {
+            project: Some("proj".to_string()),
+        })).unwrap();
+        assert_eq!(summary.context_items.len(), 1);
+        assert_eq!(summary.recent_bugs.len(), 1);
+        assert_eq!(summary.do_not_repeat.len(), 1);
+    }
+
+    #[test]
+    fn test_get_recent_sessions() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) VALUES ('s1', 'proj', datetime('now', '-1 hour'), 10, 100, 200)", []).unwrap();
+            conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) VALUES ('s2', 'proj', datetime('now'), 5, 50, 100)", []).unwrap();
+        }
+        let Json(list) = server.get_recent_sessions(Parameters(GetRecentSessionsInput {
+            days: Some(1),
+            project: None,
+        })).unwrap();
+        assert_eq!(list.results.len(), 2);
+        // Most recent first
+        assert_eq!(list.results[0].session_id, "s2");
+    }
+
+    #[test]
+    fn test_get_session_detail() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            conn.execute("INSERT INTO sessions (session_id, project, start_time, cwd, git_branch, message_count, total_input_tokens, total_output_tokens) VALUES ('sd1', 'proj', '2026-01-01', '/test', 'main', 2, 100, 200)", []).unwrap();
+            conn.execute("INSERT INTO messages (uuid, session_id, role, content_type, content, timestamp) VALUES ('m1', 'sd1', 'user', 'text', 'first message', '2026-01-01T00:00:00Z')", []).unwrap();
+            conn.execute("INSERT INTO messages (uuid, session_id, role, content_type, content, timestamp) VALUES ('m2', 'sd1', 'user', 'text', 'last message', '2026-01-01T01:00:00Z')", []).unwrap();
+            conn.execute("INSERT INTO tool_calls (message_uuid, session_id, tool_name, timestamp) VALUES ('m2', 'sd1', 'Read', '2026-01-01T01:00:00Z')", []).unwrap();
+            conn.execute("INSERT INTO tool_calls (message_uuid, session_id, tool_name, timestamp) VALUES ('m2', 'sd1', 'Read', '2026-01-01T01:01:00Z')", []).unwrap();
+        }
+        let Json(detail) = server.get_session_detail(Parameters(GetSessionDetailInput {
+            session_id: "sd1".to_string(),
+        })).unwrap();
+        assert_eq!(detail.session_id, "sd1");
+        assert_eq!(detail.first_user_message, Some("first message".to_string()));
+        assert_eq!(detail.last_user_message, Some("last message".to_string()));
+        assert_eq!(detail.tool_summary.len(), 1);
+        assert_eq!(detail.tool_summary[0].tool_name, "Read");
+        assert_eq!(detail.tool_summary[0].count, 2);
+    }
+
+    #[test]
+    fn test_search_sessions_fts() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) VALUES ('fts1', 'proj', datetime('now'), 1, 0, 0)", []).unwrap();
+            conn.execute("INSERT INTO messages (uuid, session_id, role, content_type, content) VALUES ('fm1', 'fts1', 'user', 'text', 'the arena allocator prevents drop-time regression')", []).unwrap();
+            conn.execute("INSERT INTO messages_fts (uuid, session_id, content) VALUES ('fm1', 'fts1', 'the arena allocator prevents drop-time regression')", []).unwrap();
+        }
+        let Json(list) = server.search_sessions(Parameters(SearchSessionsInput {
+            query: "regression".to_string(),
+            limit: None,
+            project: None,
+        })).unwrap();
+        assert_eq!(list.results.len(), 1);
+        assert_eq!(list.results[0].session_id, "fts1");
+    }
+
+    #[test]
+    fn test_get_file_history() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) VALUES ('fh1', 'proj', datetime('now'), 1, 0, 0)", []).unwrap();
+            conn.execute("INSERT INTO messages (uuid, session_id, role, content_type) VALUES ('fhm1', 'fh1', 'assistant', 'tool_use')", []).unwrap();
+            conn.execute("INSERT INTO tool_calls (message_uuid, session_id, tool_name, file_path, timestamp) VALUES ('fhm1', 'fh1', 'Edit', 'src/parser/pack.rs', datetime('now'))", []).unwrap();
+        }
+        let Json(list) = server.get_file_history(Parameters(GetFileHistoryInput {
+            file_path: Some("pack.rs".to_string()),
+            project: None,
+            days: None,
+        })).unwrap();
+        assert_eq!(list.results.len(), 1);
+        assert_eq!(list.results[0].tool_name, "Edit");
+    }
 }

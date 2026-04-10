@@ -40,8 +40,7 @@ pub fn open_db() -> Result<Connection> {
     Ok(conn)
 }
 
-/// Opens an in-memory database for testing.
-#[cfg(test)]
+/// Opens an in-memory database for testing. Available to all crates in the workspace.
 pub fn open_db_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     setup_pragmas(&conn)?;
@@ -204,6 +203,27 @@ mod tests {
         let s = "你好世界"; // 12 bytes
         assert_eq!(truncate_utf8(s, 6), "你好...");
         assert_eq!(truncate_utf8(s, 7), "你好...");  // lands inside 世, backs up to 6
+    }
+
+    #[test]
+    fn test_truncate_utf8_empty() {
+        assert_eq!(truncate_utf8("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_utf8_exact_boundary() {
+        assert_eq!(truncate_utf8("hello", 5), "hello");
+        assert_eq!(truncate_utf8("hello", 6), "hello");
+    }
+
+    #[test]
+    fn test_schema_version_skip() {
+        let conn = open_db_in_memory().expect("create DB");
+        // user_version should be set after first migration
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert!(version >= 1, "user_version should be set after migration");
+        // Second call should be a no-op (skip all DDL)
+        run_migrations(&conn).expect("second run should skip and succeed");
     }
 
     #[test]

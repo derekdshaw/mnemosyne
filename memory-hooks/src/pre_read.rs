@@ -52,3 +52,42 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::HookInput;
+    use serde_json::json;
+
+    fn make_input() -> HookInput {
+        HookInput {
+            session_id: Some("test-session".into()),
+            cwd: Some("D:/r/myproject".into()),
+            tool_name: Some("Read".into()),
+            tool_input: Some(json!({"file_path": "D:/r/myproject/src/main.rs"})),
+            tool_response: None,
+        }
+    }
+
+    #[test]
+    fn test_pre_read_no_anatomy() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        let input = make_input();
+        // No anatomy or session_reads data — should return Ok without panic
+        assert!(run(&conn, &input).is_ok());
+    }
+
+    #[test]
+    fn test_pre_read_repeated_read() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        let input = make_input();
+        // Seed a prior read for this session + file
+        conn.execute(
+            "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+             VALUES ('test-session', 'D:/r/myproject/src/main.rs', datetime('now'), 500)",
+            [],
+        ).unwrap();
+        // Should return Ok (stderr warning emitted but we just verify no error)
+        assert!(run(&conn, &input).is_ok());
+    }
+}

@@ -475,3 +475,112 @@ struct SessionMeta {
     first_timestamp: Option<String>,
     last_timestamp: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn write_jsonl(lines: &[&str]) -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        for line in lines {
+            writeln!(f, "{}", line).unwrap();
+        }
+        f.flush().unwrap();
+        // Set mtime to >60s ago so it's not skipped as active
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        let _ = filetime::set_file_mtime(f.path(), filetime::FileTime::from_system_time(old_time));
+        f
+    }
+
+    const USER_MSG: &str = r#"{"type":"user","uuid":"u1","sessionId":"sess1","parentUuid":"p0","cwd":"D:\\r\\proj","gitBranch":"main","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello world"}}"#;
+
+    const ASSISTANT_MSG: &str = r#"{"type":"assistant","uuid":"a1","sessionId":"sess1","parentUuid":"u1","timestamp":"2026-01-01T00:01:00Z","message":{"role":"assistant","model":"claude-opus-4-6","content":[{"type":"text","text":"Hi there!"},{"type":"tool_use","name":"Read","id":"t1","input":{"file_path":"/src/main.rs"}}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#;
+
+    #[test]
+    fn test_ingest_user_message() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        let f = write_jsonl(&[USER_MSG]);
+        let path = f.path().to_path_buf();
+        let result = ingest_file(&conn, &path, false, true).unwrap();
+        assert!(matches!(result, IngestResult::Ingested { messages: 1 }));
+
+        let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
+        let fts_count: i64 = conn.query_row("SELECT count(*) FROM messages_fts", [], |r| r.get(0)).unwrap();
+        assert_eq!(fts_count, 1);
+    }
+
+    #[test]
+    fn test_ingest_assistant_with_tool_use() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        let f = write_jsonl(&[USER_MSG, ASSISTANT_MSG]);
+        let path = f.path().to_path_buf();
+        ingest_file(&conn, &path, false, true).unwrap();
+
+        let tool_count: i64 = conn.query_row("SELECT count(*) FROM tool_calls", [], |r| r.get(0)).unwrap();
+        assert_eq!(tool_count, 1);
+        let tool_name: String = conn.query_row("SELECT tool_name FROM tool_calls LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(tool_name, "Read");
+    }
+
+    #[test]
+    fn test_ingest_token_usage() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        let f = write_jsonl(&[USER_MSG, ASSISTANT_MSG]);
+        let path = f.path().to_path_buf();
+        ingest_file(&conn, &path, false, true).unwrap();
+
+        let (input_tok, output_tok): (i64, i64) = conn.query_row(
+            "SELECT input_tokens, output_tokens FROM token_usage LIMIT 1",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(input_tok, 100);
+        assert_eq!(output_tok, 50);
+    }
+
+    #[test]
+    fn test_ingest_skip_unchanged() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        let f = write_jsonl(&[USER_MSG]);
+        let path = f.path().to_path_buf();
+        ingest_file(&conn, &path, false, true).unwrap();
+
+        // Second run with same file — should skip
+        let result = ingest_file(&conn, &path, false, true).unwrap();
+        assert!(matches!(result, IngestResult::Skipped));
+
+        // Message count should still be 1
+        let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_ingest_skip_active() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        // Create file with current mtime (active session)
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "{}", USER_MSG).unwrap();
+        f.flush().unwrap();
+        // Don't backdate mtime — it's "active"
+
+        let path = f.path().to_path_buf();
+        let result = ingest_file(&conn, &path, false, false).unwrap();
+        assert!(matches!(result, IngestResult::SkippedActive));
+    }
+
+    #[test]
+    fn test_ingest_force_active() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        // Create file with current mtime (active session)
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "{}", USER_MSG).unwrap();
+        f.flush().unwrap();
+
+        let path = f.path().to_path_buf();
+        // force=true bypasses the mtime check
+        let result = ingest_file(&conn, &path, false, true).unwrap();
+        assert!(matches!(result, IngestResult::Ingested { messages: 1 }));
+    }
+}

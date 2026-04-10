@@ -435,4 +435,55 @@ mod tests {
         assert!(parse_line("   ").unwrap().is_none());
         assert!(parse_line("not json").is_err());
     }
+
+    #[test]
+    fn test_parse_user_message_array_content() {
+        let line = r#"{"type":"user","uuid":"arr1","sessionId":"s1","message":{"role":"user","content":[{"type":"text","text":"hello"},{"type":"text","text":"world"}]}}"#;
+        let record = parse_line(line).unwrap().unwrap();
+        match record {
+            Record::UserMessage { content, .. } => {
+                assert_eq!(content, "hello\nworld");
+            }
+            _ => panic!("expected UserMessage"),
+        }
+    }
+
+    #[test]
+    fn test_parse_assistant_no_content() {
+        let line = r#"{"type":"assistant","uuid":"empty1","sessionId":"s1","message":{"role":"assistant","content":[]}}"#;
+        let record = parse_line(line).unwrap().unwrap();
+        match record {
+            Record::AssistantMessage { content_blocks, .. } => {
+                assert!(content_blocks.is_empty());
+            }
+            _ => panic!("expected AssistantMessage"),
+        }
+    }
+
+    #[test]
+    fn test_parse_assistant_missing_usage() {
+        let line = r#"{"type":"assistant","uuid":"nu1","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
+        let record = parse_line(line).unwrap().unwrap();
+        match record {
+            Record::AssistantMessage { usage, content_blocks, .. } => {
+                assert!(usage.is_none());
+                assert_eq!(content_blocks.len(), 1);
+            }
+            _ => panic!("expected AssistantMessage"),
+        }
+    }
+
+    #[test]
+    fn test_extract_tool_input_summary_bash() {
+        let input: Value = serde_json::from_str(r#"{"command":"cargo build --release 2>&1"}"#).unwrap();
+        let summary = extract_tool_input_summary("Bash", &input);
+        assert_eq!(summary, Some("cargo build --release 2>&1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_tool_input_summary_grep() {
+        let input: Value = serde_json::from_str(r#"{"pattern":"fn main","path":"/src"}"#).unwrap();
+        let summary = extract_tool_input_summary("Grep", &input);
+        assert_eq!(summary, Some("pattern: fn main".to_string()));
+    }
 }

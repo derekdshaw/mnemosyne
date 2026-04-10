@@ -62,3 +62,39 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::HookInput;
+    use serde_json::json;
+
+    fn make_input() -> HookInput {
+        HookInput {
+            session_id: Some("test-session".into()),
+            cwd: Some("D:/r/myproject".into()),
+            tool_name: Some("Edit".into()),
+            tool_input: Some(json!({"file_path": "D:/r/myproject/src/main.rs"})),
+            tool_response: None,
+        }
+    }
+
+    #[test]
+    fn test_pre_write_no_bugs() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        // No bugs or do_not_repeat rules — should return Ok
+        assert!(run(&conn, &make_input()).is_ok());
+    }
+
+    #[test]
+    fn test_pre_write_matches_bug() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO bugs (project, error_message, fix_description, file_path, created_at) \
+             VALUES ('myproject', 'null pointer', 'add null check', 'D:/r/myproject/src/main.rs', datetime('now'))",
+            [],
+        ).unwrap();
+        // Should return Ok (stderr warning emitted)
+        assert!(run(&conn, &make_input()).is_ok());
+    }
+}
