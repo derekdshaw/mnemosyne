@@ -1,3 +1,5 @@
+//! Pre-read hook: shows file anatomy and warns on repeated reads within a session.
+
 use anyhow::Result;
 use rusqlite::Connection;
 

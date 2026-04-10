@@ -1,3 +1,9 @@
+//! Input and output type definitions for all MCP tool handlers.
+//!
+//! Each tool has a `*Input` struct (deserialized from MCP tool arguments) and
+//! one or more output structs (serialized as JSON in MCP responses). JsonSchema
+//! is derived for automatic MCP tool schema generation.
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

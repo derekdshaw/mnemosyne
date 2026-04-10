@@ -1,3 +1,9 @@
+//! Real-time hook handlers for Claude Code's PreToolUse and PostToolUse events.
+//!
+//! A single binary with subcommands for each hook type. Spawned by Claude Code
+//! on every file read/write. All hooks are advisory only — they write warnings
+//! to stderr and always exit 0, never blocking tool execution.
+
 mod pre_read;
 mod post_read;
 mod pre_write;

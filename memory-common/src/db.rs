@@ -1,3 +1,9 @@
+//! SQLite database connection management for Mnemosyne.
+//!
+//! Opens the database at `~/.claude/memory/memory.db`, configures WAL mode
+//! and safety PRAGMAs, runs schema migrations with version checking, and
+//! provides path normalization utilities.
+
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::PathBuf;

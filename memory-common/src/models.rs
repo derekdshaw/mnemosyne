@@ -1,3 +1,8 @@
+//! Data model structs for all Mnemosyne database tables.
+//!
+//! Each struct corresponds to a row in a SQLite table and derives Serialize/Deserialize
+//! for JSON I/O in the MCP server and ingester.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

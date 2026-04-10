@@ -1,3 +1,10 @@
+//! File anatomy extraction for the pre-read hook.
+//!
+//! Extracts meaningful descriptions from file content based on language:
+//! doc comments, public signatures, exports, and key declarations.
+//! Stored in the `file_anatomy` table so the pre-read hook can show
+//! Claude a useful summary instead of a generic filename.
+
 use crate::db::truncate_utf8;
 
 /// Extract a meaningful description from file content based on file type.

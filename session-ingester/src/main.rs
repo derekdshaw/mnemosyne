@@ -1,3 +1,10 @@
+//! Batch ingester for Claude Code JSONL transcripts.
+//!
+//! Scans `~/.claude/projects/*/` for `.jsonl` transcript files, parses them,
+//! and inserts sessions, messages, tool calls, and token usage into the
+//! Mnemosyne SQLite database. Supports incremental ingestion (skips unchanged
+//! files) and forced ingestion of specific sessions via `--session-id`.
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use memory_common::db::{self, normalize_path, project_from_cwd, truncate_utf8};

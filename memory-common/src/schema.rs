@@ -1,6 +1,7 @@
-/// All SQL DDL statements for the Mnemosyne database.
-/// Executed idempotently via CREATE IF NOT EXISTS.
-/// PRAGMAs are set procedurally in db.rs::setup_pragmas().
+//! SQL DDL statements for all Mnemosyne database tables and indexes.
+//!
+//! All statements use CREATE IF NOT EXISTS for idempotent execution.
+//! PRAGMAs are set procedurally in [`crate::db::setup_pragmas`].
 
 pub const CREATE_INGESTION_LOG: &str = "\
     CREATE TABLE IF NOT EXISTS ingestion_log (\

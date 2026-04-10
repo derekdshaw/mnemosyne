@@ -1,3 +1,10 @@
+//! MCP server for the Mnemosyne session memory system.
+//!
+//! Exposes 11 tools over stdio JSON-RPC for searching past sessions,
+//! saving project context, logging bugs, and managing do-not-repeat rules.
+//! Claude Code manages the server lifecycle — spawning it at session start
+//! and communicating via newline-delimited JSON-RPC.
+
 mod tools;
 
 use anyhow::Result;

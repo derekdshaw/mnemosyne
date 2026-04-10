@@ -1,3 +1,5 @@
+//! Pre-write hook: warns about known bugs and do-not-repeat rules for the target file.
+
 use anyhow::Result;
 use memory_common::db::{normalize_path, truncate_utf8};
 use rusqlite::Connection;

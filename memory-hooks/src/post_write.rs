@@ -1,3 +1,5 @@
+//! Post-write hook: updates file anatomy write count and modification time.
+
 use anyhow::Result;
 use rusqlite::Connection;
 

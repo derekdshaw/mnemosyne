@@ -1,3 +1,10 @@
+//! Parser for Claude Code JSONL transcript files.
+//!
+//! Each line in a transcript is a JSON object with a `type` field. This module
+//! parses user messages, assistant messages (with tool_use blocks and usage stats),
+//! and tool results into structured [`Record`] variants. Unrecognized types are
+//! skipped gracefully.
+
 use anyhow::Result;
 use serde_json::Value;
 

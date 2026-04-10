@@ -1,3 +1,6 @@
+//! Post-read hook: records the read, extracts file anatomy from content,
+//! and updates the `file_anatomy` and `session_reads` tables.
+
 use anyhow::Result;
 use memory_common::anatomy;
 use rusqlite::Connection;
