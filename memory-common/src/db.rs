@@ -57,25 +57,38 @@ fn setup_pragmas(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Runs all schema migrations idempotently.
+/// Current schema version. Bump this whenever schema changes.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Runs schema migrations only if the database is behind the current version.
+/// Uses PRAGMA user_version to skip all migration work when schema is current.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
-    // Regular tables (CREATE IF NOT EXISTS)
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current >= SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    run_migrations_unconditionally(conn)?;
+
+    conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+    Ok(())
+}
+
+/// Runs all migration statements regardless of version. Used on first setup
+/// and when SCHEMA_VERSION is bumped.
+fn run_migrations_unconditionally(conn: &Connection) -> Result<()> {
     for sql in schema::ALL_MIGRATIONS {
         conn.execute_batch(sql)
             .with_context(|| format!("migration failed: {}", &sql[..sql.len().min(80)]))?;
     }
 
-    // Multi-statement index migrations
     for sql in schema::INDEX_MIGRATIONS {
-        // Split on semicolons and execute individually
         for stmt in sql.split(';').filter(|s| !s.trim().is_empty()) {
             conn.execute_batch(stmt)
                 .with_context(|| format!("index migration failed: {}", &stmt[..stmt.len().min(80)]))?;
         }
     }
 
-    // FTS tables need existence check since some SQLite versions
-    // don't handle IF NOT EXISTS properly for virtual tables.
     for (table_name, create_sql) in schema::FTS_MIGRATIONS {
         let exists: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",

@@ -69,33 +69,29 @@ pub fn parse_line(line: &str) -> Result<Option<Record>> {
         return Ok(None);
     }
 
-    let v: Value = serde_json::from_str(line)?;
+    let mut v: Value = serde_json::from_str(line)?;
 
-    let record_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let record_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
 
-    match record_type {
-        "user" => parse_user_message(&v),
-        "assistant" => parse_assistant_message(&v),
-        // Recognized skip types
+    match record_type.as_str() {
+        "user" => parse_user_message(&mut v),
+        "assistant" => parse_assistant_message(&mut v),
         "system" | "permission-mode" | "file-history-snapshot" | "attachment"
         | "queue-operation" | "custom-title" | "agent-name" => Ok(Some(Record::Skip)),
-        // Unknown types — skip gracefully
         _ => Ok(Some(Record::Skip)),
     }
 }
 
-fn parse_user_message(v: &Value) -> Result<Option<Record>> {
-    let uuid = str_field(v, "uuid");
-    let session_id = str_field(v, "sessionId");
-    let parent_uuid = opt_str_field(v, "parentUuid");
-    let cwd = opt_str_field(v, "cwd");
-    let git_branch = opt_str_field(v, "gitBranch");
-    let timestamp = opt_str_field(v, "timestamp");
+fn parse_user_message(v: &mut Value) -> Result<Option<Record>> {
+    let uuid = take_str(v, "uuid");
+    let session_id = take_str(v, "sessionId");
+    let parent_uuid = take_opt_str(v, "parentUuid");
+    let cwd = take_opt_str(v, "cwd");
+    let git_branch = take_opt_str(v, "gitBranch");
+    let timestamp = take_opt_str(v, "timestamp");
 
-    let message = v.get("message");
-    let content = message.and_then(|m| m.get("content"));
+    let content = v.get_mut("message").and_then(|m| m.get_mut("content")).map(Value::take);
 
-    // content can be a plain string or an array of content blocks
     match content {
         Some(Value::String(s)) => Ok(Some(Record::UserMessage {
             uuid,
@@ -104,7 +100,7 @@ fn parse_user_message(v: &Value) -> Result<Option<Record>> {
             cwd,
             git_branch,
             timestamp,
-            content: s.clone(),
+            content: s,
         })),
         Some(Value::Array(blocks)) => {
             // Check if this is a tool_result message
@@ -166,30 +162,30 @@ fn parse_user_message(v: &Value) -> Result<Option<Record>> {
     }
 }
 
-fn parse_assistant_message(v: &Value) -> Result<Option<Record>> {
-    let uuid = str_field(v, "uuid");
-    let session_id = str_field(v, "sessionId");
-    let parent_uuid = opt_str_field(v, "parentUuid");
-    let timestamp = opt_str_field(v, "timestamp");
+fn parse_assistant_message(v: &mut Value) -> Result<Option<Record>> {
+    let uuid = take_str(v, "uuid");
+    let session_id = take_str(v, "sessionId");
+    let parent_uuid = take_opt_str(v, "parentUuid");
+    let timestamp = take_opt_str(v, "timestamp");
 
-    let message = v.get("message");
-    let model = message
+    let mut message = v.get_mut("message");
+    let model = message.as_ref()
         .and_then(|m| m.get("model"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let content_blocks = message
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_array())
+    let content_blocks = message.as_mut()
+        .and_then(|m| m.get_mut("content"))
+        .and_then(|c| c.as_array_mut())
         .map(|blocks| {
             blocks
-                .iter()
+                .iter_mut()
                 .filter_map(|b| parse_content_block(b))
                 .collect()
         })
         .unwrap_or_default();
 
-    let usage = message
+    let usage = v.get("message")
         .and_then(|m| m.get("usage"))
         .map(|u| UsageInfo {
             input_tokens: u.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
@@ -215,23 +211,31 @@ fn parse_assistant_message(v: &Value) -> Result<Option<Record>> {
     }))
 }
 
-fn parse_content_block(b: &Value) -> Option<ContentBlock> {
-    let block_type = b.get("type").and_then(|t| t.as_str())?;
-    match block_type {
+fn parse_content_block(b: &mut Value) -> Option<ContentBlock> {
+    let block_type = b.get("type").and_then(|t| t.as_str())?.to_string();
+    match block_type.as_str() {
         "text" => {
-            let text = b.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            Some(ContentBlock::Text(text.to_string()))
+            let text = match b.get_mut("text").map(Value::take) {
+                Some(Value::String(s)) => s,
+                _ => String::new(),
+            };
+            Some(ContentBlock::Text(text))
         }
         "thinking" => {
-            // Extract only the thinking text, ignore the large signature field
             let thinking = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
             let truncated = truncate_utf8(thinking, 500);
             Some(ContentBlock::Thinking(truncated))
         }
         "tool_use" => {
-            let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-            let id = b.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-            let input = b.get("input").cloned().unwrap_or(Value::Null);
+            let name = match b.get_mut("name").map(Value::take) {
+                Some(Value::String(s)) => s,
+                _ => String::new(),
+            };
+            let id = match b.get_mut("id").map(Value::take) {
+                Some(Value::String(s)) => s,
+                _ => String::new(),
+            };
+            let input = b.get_mut("input").map(Value::take).unwrap_or(Value::Null);
             Some(ContentBlock::ToolUse { name, id, input })
         }
         _ => None,
@@ -304,17 +308,20 @@ fn truncate_str(s: &str, max: usize) -> String {
     truncate_utf8(s, max)
 }
 
-fn str_field(v: &Value, field: &str) -> String {
-    v.get(field)
-        .and_then(|f| f.as_str())
-        .unwrap_or("")
-        .to_string()
+/// Take a string field from a Value, consuming it (zero-copy for owned strings).
+fn take_str(v: &mut Value, field: &str) -> String {
+    match v.get_mut(field).map(Value::take) {
+        Some(Value::String(s)) => s,
+        _ => String::new(),
+    }
 }
 
-fn opt_str_field(v: &Value, field: &str) -> Option<String> {
-    v.get(field)
-        .and_then(|f| f.as_str())
-        .map(|s| s.to_string())
+/// Take an optional string field from a Value, consuming it.
+fn take_opt_str(v: &mut Value, field: &str) -> Option<String> {
+    match v.get_mut(field).map(Value::take) {
+        Some(Value::String(s)) => Some(s),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

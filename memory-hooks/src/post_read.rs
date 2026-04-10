@@ -26,25 +26,16 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
         rusqlite::params![session_id, file_path, token_estimate],
     )?;
 
-    // Update anatomy stats
+    // UPSERT anatomy: single statement instead of UPDATE-check-INSERT
     if let Some(ref proj) = project {
-        let updated = conn.execute(
-            "UPDATE file_anatomy SET times_read = times_read + 1 \
-             WHERE project = ?1 AND file_path = ?2",
-            rusqlite::params![proj, file_path],
+        let filename = file_path.rsplit('/').next().unwrap_or(&file_path);
+        let description = format!("File: {filename}");
+        conn.execute(
+            "INSERT INTO file_anatomy (project, file_path, description, estimated_tokens, last_scanned, times_read, times_written) \
+             VALUES (?1, ?2, ?3, ?4, datetime('now'), 1, 0) \
+             ON CONFLICT(project, file_path) DO UPDATE SET times_read = times_read + 1",
+            rusqlite::params![proj, file_path, description, token_estimate],
         )?;
-
-        // If no anatomy entry exists, create one with basic info
-        if updated == 0 {
-            let filename = file_path.rsplit('/').next().unwrap_or(&file_path);
-            let description = format!("File: {filename}");
-            conn.execute(
-                "INSERT OR IGNORE INTO file_anatomy \
-                 (project, file_path, description, estimated_tokens, last_scanned, times_read, times_written) \
-                 VALUES (?1, ?2, ?3, ?4, datetime('now'), 1, 0)",
-                rusqlite::params![proj, file_path, description, token_estimate],
-            )?;
-        }
     }
 
     Ok(())

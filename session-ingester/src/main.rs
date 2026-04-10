@@ -192,7 +192,7 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
     };
 
     let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
+    let mut buf_reader = BufReader::new(file);
 
     let mut line_count = 0i64;
     let mut message_count = 0usize;
@@ -208,7 +208,6 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
 
     // S11: Bounded line reading — skip lines > 10MB
     let mut line = String::new();
-    let mut buf_reader = BufReader::new(reader.into_inner());
     loop {
         line.clear();
         let bytes = buf_reader.read_line(&mut line)?;
@@ -268,19 +267,17 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
                     meta.last_timestamp = timestamp.clone();
                 }
 
-                // Insert message
-                tx.execute(
+                // Insert message (prepare_cached reuses compiled statement across iterations)
+                tx.prepare_cached(
                     "INSERT OR IGNORE INTO messages (uuid, session_id, parent_uuid, role, content_type, content, timestamp) \
                      VALUES (?1, ?2, ?3, 'user', 'text', ?4, ?5)",
-                    rusqlite::params![uuid, session_id, parent_uuid, content, timestamp],
-                )?;
+                )?.execute(rusqlite::params![uuid, session_id, parent_uuid, content, timestamp])?;
 
-                // C1: FTS5 has no unique constraints, so delete before insert to prevent duplicates
-                tx.execute("DELETE FROM messages_fts WHERE uuid = ?1", [&uuid])?;
-                tx.execute(
+                // C1: FTS5 dedup
+                tx.prepare_cached("DELETE FROM messages_fts WHERE uuid = ?1")?.execute([&uuid])?;
+                tx.prepare_cached(
                     "INSERT INTO messages_fts (uuid, session_id, content) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![uuid, session_id, content],
-                )?;
+                )?.execute(rusqlite::params![uuid, session_id, content])?;
 
                 message_count += 1;
             }
@@ -307,18 +304,17 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
                     // C3: Use truncate_utf8 for safe multi-byte truncation
                     let content_truncated = truncate_utf8(&result.content, 500);
 
-                    tx.execute(
+                    tx.prepare_cached(
                         "INSERT OR IGNORE INTO messages (uuid, session_id, parent_uuid, role, content_type, content, tool_name, timestamp) \
                          VALUES (?1, ?2, ?3, 'user', 'tool_result', ?4, ?5, ?6)",
-                        rusqlite::params![
-                            result_uuid,
-                            session_id,
-                            parent_uuid,
-                            content_truncated,
-                            result.tool_use_id,
-                            timestamp,
-                        ],
-                    )?;
+                    )?.execute(rusqlite::params![
+                        result_uuid,
+                        session_id,
+                        parent_uuid,
+                        content_truncated,
+                        result.tool_use_id,
+                        timestamp,
+                    ])?;
                 }
                 message_count += 1;
             }
@@ -336,16 +332,16 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
                     meta.last_timestamp = timestamp.clone();
                 }
 
-                // Collect text content for the message
+                // Collect text content — consume content_blocks by value (no cloning)
                 let mut text_parts: Vec<String> = Vec::new();
                 let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
 
-                for block in &content_blocks {
+                for block in content_blocks {
                     match block {
-                        ContentBlock::Text(t) => text_parts.push(t.clone()),
+                        ContentBlock::Text(t) => text_parts.push(t),
                         ContentBlock::Thinking(t) => text_parts.push(format!("[thinking] {t}")),
                         ContentBlock::ToolUse { name, id, input } => {
-                            tool_uses.push((name.clone(), id.clone(), input.clone()));
+                            tool_uses.push((name, id, input));
                         }
                     }
                 }
@@ -362,27 +358,25 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
                     "text"
                 };
 
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT OR IGNORE INTO messages (uuid, session_id, parent_uuid, role, content_type, content, timestamp, model) \
                      VALUES (?1, ?2, ?3, 'assistant', ?4, ?5, ?6, ?7)",
-                    rusqlite::params![
-                        uuid,
-                        session_id,
-                        parent_uuid,
-                        content_type,
-                        content_text,
-                        timestamp,
-                        model,
-                    ],
-                )?;
+                )?.execute(rusqlite::params![
+                    uuid,
+                    session_id,
+                    parent_uuid,
+                    content_type,
+                    content_text,
+                    timestamp,
+                    model,
+                ])?;
 
                 // C1: FTS5 dedup — delete before insert
                 if let Some(ref text) = content_text {
-                    tx.execute("DELETE FROM messages_fts WHERE uuid = ?1", [&uuid])?;
-                    tx.execute(
+                    tx.prepare_cached("DELETE FROM messages_fts WHERE uuid = ?1")?.execute([&uuid])?;
+                    tx.prepare_cached(
                         "INSERT INTO messages_fts (uuid, session_id, content) VALUES (?1, ?2, ?3)",
-                        rusqlite::params![uuid, session_id, text],
-                    )?;
+                    )?.execute(rusqlite::params![uuid, session_id, text])?;
                 }
 
                 // Insert tool calls
@@ -392,34 +386,32 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
                     let input_summary =
                         jsonl::extract_tool_input_summary(tool_name, tool_input);
 
-                    tx.execute(
+                    tx.prepare_cached(
                         "INSERT INTO tool_calls (message_uuid, session_id, tool_name, tool_input_summary, file_path, timestamp) \
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        rusqlite::params![
-                            uuid,
-                            session_id,
-                            tool_name,
-                            input_summary,
-                            file_path,
-                            timestamp,
-                        ],
-                    )?;
+                    )?.execute(rusqlite::params![
+                        uuid,
+                        session_id,
+                        tool_name,
+                        input_summary,
+                        file_path,
+                        timestamp,
+                    ])?;
                 }
 
                 // Insert token usage
                 if let Some(usage) = usage {
-                    tx.execute(
+                    tx.prepare_cached(
                         "INSERT OR IGNORE INTO token_usage (message_uuid, session_id, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) \
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        rusqlite::params![
-                            uuid,
-                            session_id,
-                            usage.input_tokens,
-                            usage.output_tokens,
-                            usage.cache_read_tokens,
-                            usage.cache_creation_tokens,
-                        ],
-                    )?;
+                    )?.execute(rusqlite::params![
+                        uuid,
+                        session_id,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_read_tokens,
+                        usage.cache_creation_tokens,
+                    ])?;
                 }
 
                 message_count += 1;
