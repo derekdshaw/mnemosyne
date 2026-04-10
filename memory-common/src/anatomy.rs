@@ -20,6 +20,8 @@ pub fn extract_description(content: &str, file_path: &str) -> String {
         "rs" => extract_rust(content),
         "py" => extract_python(content),
         "ts" | "tsx" | "js" | "jsx" => extract_js_ts(content),
+        "java" => extract_java(content),
+        "go" => extract_go(content),
         "md" | "markdown" => extract_markdown(content),
         "toml" => extract_toml(content),
         "json" => extract_json(content),
@@ -155,6 +157,143 @@ fn extract_js_ts(content: &str) -> String {
                 .unwrap_or(trimmed)
                 .trim();
             exports.push(name.to_string());
+        }
+    }
+    if !exports.is_empty() {
+        parts.push(format!("Exports: {}", exports.join(", ")));
+    }
+
+    parts.join(". ")
+}
+
+fn extract_java(content: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Javadoc on the class: first /** ... */ block
+    if let Some(start) = content.find("/**") {
+        if let Some(end) = content[start..].find("*/") {
+            let comment = &content[start + 3..start + end];
+            let text: String = comment
+                .lines()
+                .map(|l| l.trim().trim_start_matches('*').trim())
+                .filter(|l| !l.is_empty() && !l.starts_with('@'))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+    }
+
+    // Package declaration
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("package ") {
+            let pkg = trimmed.trim_end_matches(';').trim();
+            parts.push(pkg.to_string());
+            break;
+        }
+    }
+
+    // Public class/interface/enum/record declarations and public method signatures
+    let mut declarations: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("public class ")
+            || trimmed.starts_with("public interface ")
+            || trimmed.starts_with("public enum ")
+            || trimmed.starts_with("public record ")
+            || trimmed.starts_with("public abstract class ")
+        {
+            let name = trimmed
+                .splitn(2, |c: char| c == '{' || c == '<')
+                .next()
+                .unwrap_or(trimmed)
+                .trim();
+            declarations.push(name.to_string());
+        } else if trimmed.starts_with("public ") && trimmed.contains('(') && !trimmed.contains("class ") {
+            // Public method signature
+            let sig = trimmed
+                .splitn(2, '{')
+                .next()
+                .unwrap_or(trimmed)
+                .trim()
+                .trim_end_matches(';')
+                .trim();
+            declarations.push(sig.to_string());
+        }
+    }
+    if !declarations.is_empty() {
+        parts.push(format!("Declares: {}", declarations.join(", ")));
+    }
+
+    parts.join(". ")
+}
+
+fn extract_go(content: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Package-level doc comment: // lines immediately before `package`
+    let mut doc_lines: Vec<&str> = Vec::new();
+    let mut found_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("// ") && !found_package {
+            doc_lines.push(trimmed.trim_start_matches("//").trim());
+        } else if trimmed.starts_with("package ") {
+            found_package = true;
+            let pkg = trimmed.trim();
+            parts.push(pkg.to_string());
+            break;
+        } else {
+            // Non-comment, non-blank line before package — reset doc lines
+            if !trimmed.is_empty() {
+                doc_lines.clear();
+            }
+        }
+    }
+    if !doc_lines.is_empty() {
+        parts.insert(0, doc_lines.join(" "));
+    }
+
+    // Exported types and functions (capitalized names)
+    let mut exports: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("func ") {
+            // func FuncName( or func (receiver) FuncName(
+            let after_func = &trimmed[5..];
+            let name = if after_func.starts_with('(') {
+                // Method with receiver: func (r *Recv) Name(
+                after_func
+                    .find(')')
+                    .and_then(|i| {
+                        let rest = after_func[i + 1..].trim();
+                        rest.split(|c: char| c == '(' || c == ' ').next()
+                    })
+                    .unwrap_or("")
+            } else {
+                after_func
+                    .split(|c: char| c == '(' || c == ' ' || c == '[')
+                    .next()
+                    .unwrap_or("")
+            };
+            if !name.is_empty() && name.starts_with(|c: char| c.is_uppercase()) {
+                exports.push(format!("func {name}"));
+            }
+        } else if trimmed.starts_with("type ") {
+            let after_type = &trimmed[5..];
+            let name = after_type
+                .split(|c: char| c == ' ' || c == '[')
+                .next()
+                .unwrap_or("");
+            if !name.is_empty() && name.starts_with(|c: char| c.is_uppercase()) {
+                let kind = after_type
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("type");
+                exports.push(format!("type {name} {kind}"));
+            }
         }
     }
     if !exports.is_empty() {
@@ -337,5 +476,99 @@ mod tests {
         assert!(desc.contains("Workspace configuration"));
         assert!(desc.contains("[workspace]"));
         assert!(desc.contains("[dependencies]"));
+    }
+
+    #[test]
+    fn test_extract_java_class() {
+        let content = "\
+package com.example.service;
+
+import java.util.List;
+
+/** Manages user authentication and session tokens. */
+public class AuthService {
+    public void login(String user, String pass) {}
+    public boolean validate(String token) {}
+    private void internal() {}
+}
+";
+        let desc = extract_description(content, "AuthService.java");
+        assert!(desc.contains("Manages user authentication"), "got: {desc}");
+        assert!(desc.contains("package com.example.service"), "got: {desc}");
+        assert!(desc.contains("public class AuthService"), "got: {desc}");
+        assert!(desc.contains("public void login"), "got: {desc}");
+        assert!(desc.contains("public boolean validate"), "got: {desc}");
+        assert!(!desc.contains("internal"), "should not contain private methods: {desc}");
+    }
+
+    #[test]
+    fn test_extract_java_interface() {
+        let content = "\
+package com.example.api;
+
+public interface Repository<T> {
+    public T findById(long id);
+    public List<T> findAll();
+}
+";
+        let desc = extract_description(content, "Repository.java");
+        assert!(desc.contains("public interface Repository"), "got: {desc}");
+        assert!(desc.contains("public T findById"), "got: {desc}");
+    }
+
+    #[test]
+    fn test_extract_go_package() {
+        let content = "\
+// Package handler provides HTTP request handling for the API.
+// It implements routing, middleware, and error handling.
+package handler
+
+import \"net/http\"
+
+// Server is the main HTTP server.
+type Server struct {
+    router *http.ServeMux
+}
+
+// NewServer creates a configured server instance.
+func NewServer(addr string) *Server {
+    return &Server{}
+}
+
+// Start begins listening on the configured address.
+func (s *Server) Start() error {
+    return nil
+}
+
+func helperFunc() {}
+";
+        let desc = extract_description(content, "handler.go");
+        assert!(desc.contains("HTTP request handling"), "got: {desc}");
+        assert!(desc.contains("package handler"), "got: {desc}");
+        assert!(desc.contains("func NewServer"), "got: {desc}");
+        assert!(desc.contains("func Start"), "got: {desc}");
+        assert!(desc.contains("type Server struct"), "got: {desc}");
+        assert!(!desc.contains("helperFunc"), "should not contain unexported func: {desc}");
+    }
+
+    #[test]
+    fn test_extract_go_exported_types() {
+        let content = "\
+package models
+
+type User struct {
+    Name string
+}
+
+type Role interface {
+    Permissions() []string
+}
+
+type internal struct{}
+";
+        let desc = extract_description(content, "models.go");
+        assert!(desc.contains("type User struct"), "got: {desc}");
+        assert!(desc.contains("type Role interface"), "got: {desc}");
+        assert!(!desc.contains("internal"), "should not contain unexported type: {desc}");
     }
 }
