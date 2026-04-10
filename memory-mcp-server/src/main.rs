@@ -5,9 +5,34 @@ use memory_common::db::{self, truncate_utf8};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::ServerInfo;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
+use rusqlite::types::{ToSql, ToSqlOutput};
 use rusqlite::Connection;
 use std::sync::Mutex;
 use tools::*;
+
+/// Stack-allocated SQL parameter enum. Avoids `Box<dyn ToSql>` heap allocations
+/// and the double-vec indirection (`Vec<Box<dyn ToSql>>` + `Vec<&dyn ToSql>`)
+/// that was previously needed for dynamic query building with optional filters.
+///
+/// MCP tool queries build SQL dynamically based on which optional parameters the
+/// caller provides (project, days, file_path, tags, etc.). This requires a
+/// heterogeneous parameter list. Rather than boxing each parameter on the heap,
+/// this enum wraps the three types we actually use — the match dispatches
+/// statically, and `Vec<Param>` is a single contiguous allocation.
+#[allow(dead_code)] // Int reserved for future queries (e.g., get_token_stats)
+enum Param {
+    Text(String),
+    Int(i64),
+}
+
+impl ToSql for Param {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        match self {
+            Param::Text(s) => s.to_sql(),
+            Param::Int(i) => i.to_sql(),
+        }
+    }
+}
 
 /// S1: Escape FTS5 query to prevent operator abuse. Wraps in double quotes as a phrase.
 fn escape_fts_query(q: &str) -> String {
@@ -52,20 +77,19 @@ impl MnemosyneServer {
              JOIN sessions s ON m.session_id = s.session_id \
              WHERE messages_fts MATCH ?1"
         );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(escape_fts_query(&input.query))];
+        let mut params: Vec<Param> = vec![Param::Text(escape_fts_query(&input.query))];
 
         if let Some(ref project) = input.project {
             sql.push_str(" AND s.project = ?2");
-            params.push(Box::new(project.clone()));
+            params.push(Param::Text(project.clone()));
         }
 
         sql.push_str(" GROUP BY m.session_id ORDER BY s.start_time DESC");
         sql.push_str(&format!(" LIMIT {limit}"));
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
-            .query_map(param_refs.as_slice(), |row| {
+            .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(SessionResult {
                     session_id: row.get(0)?,
                     project: row.get(1)?,
@@ -97,19 +121,17 @@ impl MnemosyneServer {
              total_input_tokens, total_output_tokens \
              FROM sessions WHERE start_time >= datetime('now', ?1)"
         );
-        let days_param = format!("-{days} days");
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(days_param)];
+        let mut params: Vec<Param> = vec![Param::Text(format!("-{days} days"))];
 
         if let Some(ref project) = input.project {
             sql.push_str(" AND project = ?2");
-            params.push(Box::new(project.clone()));
+            params.push(Param::Text(project.clone()));
         }
         sql.push_str(" ORDER BY start_time DESC LIMIT 50");
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
-            .query_map(param_refs.as_slice(), |row| {
+            .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(SessionResult {
                     session_id: row.get(0)?,
                     project: row.get(1)?,
@@ -220,27 +242,26 @@ impl MnemosyneServer {
              JOIN sessions s ON tc.session_id = s.session_id \
              WHERE 1=1"
         );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut params: Vec<Param> = Vec::new();
 
         if let Some(ref fp) = input.file_path {
             sql.push_str(&format!(" AND tc.file_path LIKE ?{}", params.len() + 1));
-            params.push(Box::new(format!("%{fp}%")));
+            params.push(Param::Text(format!("%{fp}%")));
         }
         if let Some(ref project) = input.project {
             sql.push_str(&format!(" AND s.project = ?{}", params.len() + 1));
-            params.push(Box::new(project.clone()));
+            params.push(Param::Text(project.clone()));
         }
         if let Some(days) = input.days {
             let d = days.clamp(1, 365);
             sql.push_str(&format!(" AND tc.timestamp >= datetime('now', ?{})", params.len() + 1));
-            params.push(Box::new(format!("-{d} days")));
+            params.push(Param::Text(format!("-{d} days")));
         }
         sql.push_str(" ORDER BY tc.timestamp DESC LIMIT 50");
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
-            .query_map(param_refs.as_slice(), |row| {
+            .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(FileHistoryEntry {
                     session_id: row.get(0)?,
                     project: row.get(1)?,
@@ -305,22 +326,21 @@ impl MnemosyneServer {
              JOIN context_items c ON f.item_id = CAST(c.id AS TEXT) \
              WHERE context_fts MATCH ?1"
         );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(escape_fts_query(&input.query))];
+        let mut params: Vec<Param> = vec![Param::Text(escape_fts_query(&input.query))];
 
         if let Some(ref category) = input.category {
             sql.push_str(" AND c.category = ?2");
-            params.push(Box::new(category.clone()));
+            params.push(Param::Text(category.clone()));
         }
         if let Some(ref project) = input.project {
             sql.push_str(&format!(" AND c.project = ?{}", params.len() + 1));
-            params.push(Box::new(project.clone()));
+            params.push(Param::Text(project.clone()));
         }
         sql.push_str(&format!(" LIMIT {limit}"));
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
-            .query_map(param_refs.as_slice(), |row| {
+            .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(ContextItemResult {
                     id: row.get(0)?,
                     project: row.get(1)?,
@@ -498,25 +518,24 @@ impl MnemosyneServer {
              JOIN bugs b ON f.bug_id = CAST(b.id AS TEXT) \
              WHERE bugs_fts MATCH ?1"
         );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(escape_fts_query(&input.query))];
+        let mut params: Vec<Param> = vec![Param::Text(escape_fts_query(&input.query))];
 
         if let Some(ref project) = input.project {
             sql.push_str(&format!(" AND b.project = ?{}", params.len() + 1));
-            params.push(Box::new(project.clone()));
+            params.push(Param::Text(project.clone()));
         }
         // M6: Filter by tags if provided
         if let Some(ref tags) = input.tags {
             for tag in tags.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()) {
                 sql.push_str(&format!(" AND b.tags LIKE ?{}", params.len() + 1));
-                params.push(Box::new(format!("%{tag}%")));
+                params.push(Param::Text(format!("%{tag}%")));
             }
         }
         sql.push_str(" ORDER BY b.created_at DESC LIMIT 20");
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
-            .query_map(param_refs.as_slice(), |row| {
+            .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(BugResult {
                     id: row.get(0)?,
                     error_message: row.get(1)?,
@@ -588,22 +607,21 @@ impl MnemosyneServer {
         let mut sql = String::from(
             "SELECT id, rule, reason, file_path, created_at FROM do_not_repeat WHERE 1=1"
         );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut params: Vec<Param> = Vec::new();
 
         if let Some(ref project) = input.project {
             sql.push_str(&format!(" AND project = ?{}", params.len() + 1));
-            params.push(Box::new(project.clone()));
+            params.push(Param::Text(project.clone()));
         }
         if let Some(ref fp) = input.file_path {
             sql.push_str(&format!(" AND (file_path = ?{} OR file_path IS NULL)", params.len() + 1));
-            params.push(Box::new(db::normalize_path(fp)));
+            params.push(Param::Text(db::normalize_path(fp)));
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT 100");
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
-            .query_map(param_refs.as_slice(), |row| {
+            .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(DoNotRepeatResult {
                     id: row.get(0)?,
                     rule: row.get(1)?,
