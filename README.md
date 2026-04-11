@@ -177,11 +177,13 @@ These happen automatically without any action from the user:
 
 **Session end** — The ingester runs again with `--from-stdin`, immediately ingesting the just-finished session's transcript so other concurrent agents can access it without waiting for a new session to start.
 
-**Reading a file** — The pre-read hook checks the file anatomy index and warns if the file was already read this session:
+**Reading a file** — After a read, the post-read hook extracts a content-aware description from the file (doc comments, public signatures, exports) and stores it in the `file_anatomy` table. On subsequent reads, the pre-read hook shows this summary and warns if the file was already read this session:
 ```
-📄 pack.rs: Pack file parsing, delta resolution (~1,200 tokens)
+📄 pack.rs: Pack file parsing and delta resolution. Exports: pub fn parse_pack, pub struct DeltaArena (~1,200 tokens)
 ⚠️ Already read at 2026-04-09 14:30:00 (1200 tokens). Consider if re-read is needed.
 ```
+
+Anatomy extraction supports Rust, Python, TypeScript/JavaScript, Java, Go, Markdown, TOML, JSON, and YAML. Descriptions are refreshed on every read so they stay current as files change.
 
 **Writing a file** — The pre-write hook checks for known bugs and do-not-repeat rules on the target file:
 ```
@@ -304,7 +306,7 @@ All hooks are **advisory only** — they always exit 0 and never block tool exec
 | Hook | Event | What It Does |
 |------|-------|-------------|
 | `pre-read` | Before file read | Shows anatomy info (description + token estimate), warns on repeated reads |
-| `post-read` | After file read | Records the read in session tracking, updates file anatomy stats |
+| `post-read` | After file read | Records the read, extracts content-aware description (doc comments, signatures) into file anatomy |
 | `pre-write` | Before file write/edit | Warns about known bugs and do-not-repeat rules matching the target file |
 | `post-write` | After file write/edit | Updates file anatomy write count and modification time |
 
@@ -327,12 +329,12 @@ SQLite database is stored at `~/.claude/memory/memory.db` with WAL mode enabled 
 - `do_not_repeat` — Rules for mistakes to avoid, queried by exact project/file match
 
 **Hook tables** (populated by real-time hooks):
-- `file_anatomy` — Per-project file index with descriptions and token estimates
+- `file_anatomy` — Per-project file index with content-aware descriptions (doc comments, public signatures, exports), token estimates, and read/write counts
 - `session_reads` — Files read in the current session (for repeated-read detection)
 
 ## Run Tests
 
 ```bash
-cargo test          # 54 tests across all 4 crates
+cargo test          # 67 tests across all 4 crates
 cargo test -- -q    # quiet output, just pass/fail
 ```

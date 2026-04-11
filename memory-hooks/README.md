@@ -41,13 +41,16 @@ Each hook receives JSON on stdin from Claude Code:
 ### Subcommand Behavior
 
 **`pre-read`** — Runs before every file read:
-1. Looks up the file in `file_anatomy` → prints description and token estimate to stderr
+1. Looks up the file in `file_anatomy` → prints content-aware description and token estimate to stderr
 2. Checks `session_reads` for the current session → warns if file was already read
 
 **`post-read`** — Runs after every file read:
-1. Estimates tokens from response content (chars / 3.5)
-2. Inserts into `session_reads` (session tracking)
-3. Increments `file_anatomy.times_read` or creates a new anatomy entry
+1. Extracts a content-aware description from the file (doc comments, public signatures, exports) via `memory_common::anatomy::extract_description()`
+2. Estimates tokens from response content (chars / 3.5)
+3. Inserts into `session_reads` (session tracking)
+4. Upserts `file_anatomy` with the description, token estimate, and read count. Description is refreshed on every read so it stays current as files change.
+
+Supported languages for anatomy extraction: Rust, Python, TypeScript/JavaScript, Java, Go, Markdown, TOML, JSON, YAML (with a first-line fallback for other types).
 
 **`pre-write`** — Runs before every file write/edit:
 1. Queries `bugs` table for the target file → warns about known bugs

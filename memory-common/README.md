@@ -7,8 +7,9 @@ Shared library crate for the Mnemosyne workspace. Provides the SQLite schema, JS
 This crate is the foundation layer. It owns:
 
 - **Database setup** — Opening the SQLite database, configuring WAL mode and PRAGMAs, running schema migrations
-- **Schema definitions** — All 12 tables and 4 FTS5 virtual tables as SQL constants
+- **Schema definitions** — All 12 tables and 3 FTS5 virtual tables as SQL constants
 - **JSONL parser** — Streaming parser for Claude Code's transcript format (`~/.claude/projects/*/*.jsonl`)
+- **File anatomy extraction** — Extracts content-aware descriptions from source files (doc comments, public signatures, exports) for 9 languages
 - **Data models** — Rust structs for all database entities
 - **Path utilities** — Normalizing file paths to forward slashes for consistent cross-platform storage, deriving project names from working directories
 
@@ -16,7 +17,8 @@ This crate is the foundation layer. It owns:
 
 ```
 lib.rs
-├── db.rs       — open_db(), run_migrations(), normalize_path(), project_from_cwd()
+├── anatomy.rs  — extract_description(): content-aware file summaries for 9 languages
+├── db.rs       — open_db(), run_migrations(), normalize_path(), project_from_cwd(), truncate_utf8()
 ├── schema.rs   — SQL DDL constants (CREATE TABLE, CREATE INDEX, FTS5)
 ├── models.rs   — Serde-enabled structs: Session, Message, ToolCall, Bug, etc.
 └── jsonl.rs    — parse_line() → Record enum, extract_file_path(), extract_tool_input_summary()
@@ -52,4 +54,4 @@ cargo build -p memory-common
 cargo test -p memory-common
 ```
 
-11 tests covering database creation, migration idempotency, JSONL parsing (user messages, assistant messages, tool results, thinking block truncation, skip types, malformed lines), file path extraction, and path normalization.
+34 tests covering database creation, migration idempotency, schema version skip, JSONL parsing (user messages, assistant messages, tool results, array content, missing usage, thinking block truncation, skip types, malformed lines), file path extraction, tool input summaries, path normalization, UTF-8 truncation (ASCII, emoji, CJK, empty, boundary), and anatomy extraction (Rust, Python, TypeScript, Java, Go, Markdown, TOML, empty, fallback).
