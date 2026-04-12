@@ -258,31 +258,30 @@ impl MnemosyneServer {
     ) -> Result<Json<FileHistoryList>, rmcp::ErrorData> {
         let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let mut sql = String::from(
-            "SELECT tc.session_id, s.project, tc.tool_name, tc.tool_input_summary, \
+        // Static query with 3 fixed params — empty string means "no filter".
+        let file_path_pattern = input.file_path.as_ref()
+            .map(|fp| format!("%{fp}%"))
+            .unwrap_or_default();
+        let project = input.project.clone().unwrap_or_default();
+        let days_param = input.days
+            .map(|d| format!("-{} days", d.clamp(1, 365)))
+            .unwrap_or_default();
+        let params = [
+            Param::Text(file_path_pattern),
+            Param::Text(project),
+            Param::Text(days_param),
+        ];
+
+        let sql = "SELECT tc.session_id, s.project, tc.tool_name, tc.tool_input_summary, \
              tc.file_path, tc.timestamp \
              FROM tool_calls tc \
              JOIN sessions s ON tc.session_id = s.session_id \
-             WHERE 1=1"
-        );
-        let mut params: Vec<Param> = Vec::new();
+             WHERE (?1 = '' OR tc.file_path LIKE ?1) \
+             AND (?2 = '' OR s.project = ?2) \
+             AND (?3 = '' OR tc.timestamp >= datetime('now', ?3)) \
+             ORDER BY tc.timestamp DESC LIMIT 50";
 
-        if let Some(ref fp) = input.file_path {
-            sql.push_str(&format!(" AND tc.file_path LIKE ?{}", params.len() + 1));
-            params.push(Param::Text(format!("%{fp}%")));
-        }
-        if let Some(ref project) = input.project {
-            sql.push_str(&format!(" AND s.project = ?{}", params.len() + 1));
-            params.push(Param::Text(project.clone()));
-        }
-        if let Some(days) = input.days {
-            let d = days.clamp(1, 365);
-            sql.push_str(&format!(" AND tc.timestamp >= datetime('now', ?{})", params.len() + 1));
-            params.push(Param::Text(format!("-{d} days")));
-        }
-        sql.push_str(" ORDER BY tc.timestamp DESC LIMIT 50");
-
-        let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn.prepare(sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
             .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(FileHistoryEntry {
