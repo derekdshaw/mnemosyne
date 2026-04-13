@@ -209,6 +209,43 @@ When working:
 - After investigating a file's history, call `get_file_history` to see past changes and context.
 ```
 
+Here's a more comprehensive example for a team project with specific workflow rules:
+
+```markdown
+## Session Memory (Mnemosyne)
+
+### Session Start
+Always begin by calling `get_project_summary` to load context from prior sessions.
+Review the returned bugs, do-not-repeat rules, and architecture decisions before
+starting any work. If the summary mentions relevant prior sessions, call
+`get_session_detail` to understand what was done and why.
+
+### During Development
+- **Before reading a file**: Check the pre-read hook output. If the anatomy description
+  tells you enough about the file's contents, you may not need to read it.
+- **Before exploring new areas**: Call `search_sessions` with relevant keywords. Another
+  session may have already investigated the same code or problem.
+- **After fixing a bug**: Always call `log_bug` with:
+  - The exact error message (for future search matching)
+  - The root cause (so we understand why it happened)
+  - The fix description (so we know how to handle it next time)
+  - The file_path (so pre-write hooks can warn about it)
+- **When the user corrects you**: Call `add_do_not_repeat` immediately. Include the
+  reason — it helps judge edge cases later. Scope to a file_path when the rule only
+  applies to specific code.
+- **Architecture decisions**: Call `save_context` with category "architecture" whenever
+  we choose a library, design pattern, or structural approach. Include the reasoning.
+- **Performance decisions**: Call `save_context` with category "performance" for any
+  optimization choice, benchmark result, or performance-related constraint.
+- **Conventions**: Call `save_context` with category "conventions" for coding style
+  decisions, naming patterns, or workflow preferences the user expresses.
+
+### File History
+When the user asks about changes to a file or why something is the way it is,
+call `get_file_history` first. It shows which sessions modified the file and what
+tool calls were made, giving you context before reading git blame.
+```
+
 #### Bootstrapping a Session
 
 ```

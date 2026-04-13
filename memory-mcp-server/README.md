@@ -40,7 +40,7 @@ tools.rs
 | `save_context` | content, category, project? | Save a knowledge item (architecture, conventions, etc.) |
 | `search_context` | query, category?, project?, limit? | FTS5 search on saved context |
 | `get_project_summary` | project? | All context + bugs + do-not-repeat + token stats |
-| `log_bug` | error_message, fix_description, root_cause?, tags?, file_path? | Record a bug fix |
+| `log_bug` | error_message, fix_description, root_cause?, tags?, file_path?, project? | Record a bug fix |
 | `search_bugs` | query, tags?, project? | FTS5 search on bug records |
 | `add_do_not_repeat` | rule, reason?, project?, file_path? | Add a do-not-repeat rule |
 | `get_do_not_repeat` | project?, file_path? | List active do-not-repeat rules |
@@ -66,14 +66,20 @@ npx @modelcontextprotocol/inspector ./target/debug/memory-mcp-server
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | ./target/release/memory-mcp-server
 ```
 
+## Test
+
+```bash
+cargo test -p memory-mcp-server   # 18 tests covering all 11 tools + helper functions
+```
+
 ## Configuration
 
-Register in `~/.claude/settings.json`:
+Register in `~/.claude/.mcp.json` (not settings.json — MCP servers have their own config file):
 
 ```json
 {
   "mcpServers": {
-    "memory": {
+    "mnemosyne": {
       "command": "/absolute/path/to/memory-mcp-server",
       "args": []
     }
