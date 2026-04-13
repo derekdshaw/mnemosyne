@@ -645,6 +645,297 @@ impl MnemosyneServer {
 
         Ok(Json(DoNotRepeatList { results }))
     }
+
+    /// Get token usage statistics with savings estimates.
+    #[tool(name = "get_token_stats")]
+    fn get_token_stats(
+        &self,
+        Parameters(input): Parameters<GetTokenStatsInput>,
+    ) -> Result<Json<TokenStatsReport>, rmcp::ErrorData> {
+        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let days = clamp_days(input.days.or(Some(30)));
+        let project = input.project.clone().unwrap_or_default();
+        let params = [
+            Param::Text(format!("-{days} days")),
+            Param::Text(project.clone()),
+        ];
+
+        // Session + token aggregates
+        let (total_sessions, total_input, total_output): (i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(total_input_tokens), 0), COALESCE(SUM(total_output_tokens), 0) \
+             FROM sessions WHERE start_time >= datetime('now', ?1) AND (?2 = '' OR project = ?2)",
+            rusqlite::params_from_iter(&params),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        // Cache tokens
+        let (cache_read, cache_creation): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(tu.cache_read_tokens), 0), COALESCE(SUM(tu.cache_creation_tokens), 0) \
+             FROM token_usage tu JOIN sessions s ON tu.session_id = s.session_id \
+             WHERE s.start_time >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2)",
+            rusqlite::params_from_iter(&params),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let avg_input = if total_sessions > 0 { total_input / total_sessions } else { 0 };
+        let avg_output = if total_sessions > 0 { total_output / total_sessions } else { 0 };
+
+        // Files with anatomy
+        let files_with_anatomy: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM file_anatomy WHERE (?1 = '' OR project = ?1)",
+            [&Param::Text(project.clone())],
+            |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        // Total file reads and repeated reads
+        let total_file_reads: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM session_reads",
+            [],
+            |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let repeated_reads: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM (SELECT session_id, file_path FROM session_reads \
+             GROUP BY session_id, file_path HAVING COUNT(*) > 1)",
+            [],
+            |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        // Estimated saveable tokens: sum of token_estimate for non-first reads per (session, file)
+        let saveable: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(token_estimate), 0) FROM session_reads \
+             WHERE id NOT IN (SELECT MIN(id) FROM session_reads GROUP BY session_id, file_path)",
+            [],
+            |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        // Top 5 sessions by total tokens
+        let mut stmt = conn.prepare(
+            "SELECT session_id, project, (total_input_tokens + total_output_tokens) as total, start_time \
+             FROM sessions WHERE start_time >= datetime('now', ?1) AND (?2 = '' OR project = ?2) \
+             ORDER BY total DESC LIMIT 5"
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let top_sessions: Vec<TokenSessionEntry> = stmt
+            .query_map(rusqlite::params_from_iter(&params), |row| {
+                Ok(TokenSessionEntry {
+                    session_id: row.get(0)?,
+                    project: row.get(1)?,
+                    total_tokens: row.get(2)?,
+                    start_time: row.get(3)?,
+                })
+            })
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(Json(TokenStatsReport {
+            period_days: days,
+            project: input.project,
+            total_sessions,
+            total_input_tokens: total_input,
+            total_output_tokens: total_output,
+            total_cache_read_tokens: cache_read,
+            total_cache_creation_tokens: cache_creation,
+            avg_input_per_session: avg_input,
+            avg_output_per_session: avg_output,
+            files_with_anatomy,
+            total_file_reads,
+            repeated_reads_warned: repeated_reads,
+            estimated_tokens_saveable: saveable,
+            top_sessions_by_tokens: top_sessions,
+        }))
+    }
+
+    /// Get a comprehensive analytics report: usage, productivity, savings, and memory health.
+    #[tool(name = "get_analytics")]
+    fn get_analytics(
+        &self,
+        Parameters(input): Parameters<GetAnalyticsInput>,
+    ) -> Result<Json<AnalyticsReport>, rmcp::ErrorData> {
+        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let days = clamp_days(input.days.or(Some(30)));
+        let project = input.project.clone().unwrap_or_default();
+        let params = [
+            Param::Text(format!("-{days} days")),
+            Param::Text(project.clone()),
+        ];
+
+        // --- Usage ---
+        let (total_sessions, total_input, total_output): (i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(total_input_tokens), 0), COALESCE(SUM(total_output_tokens), 0) \
+             FROM sessions WHERE start_time >= datetime('now', ?1) AND (?2 = '' OR project = ?2)",
+            rusqlite::params_from_iter(&params),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let cache_read: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(tu.cache_read_tokens), 0) \
+             FROM token_usage tu JOIN sessions s ON tu.session_id = s.session_id \
+             WHERE s.start_time >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2)",
+            rusqlite::params_from_iter(&params),
+            |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        // --- Productivity ---
+        let mut stmt = conn.prepare(
+            "SELECT tc.tool_name, COUNT(*) as cnt FROM tool_calls tc \
+             JOIN sessions s ON tc.session_id = s.session_id \
+             WHERE s.start_time >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2) \
+             GROUP BY tc.tool_name ORDER BY cnt DESC"
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let tool_call_breakdown: Vec<ToolBreakdownEntry> = stmt
+            .query_map(rusqlite::params_from_iter(&params), |row| {
+                Ok(ToolBreakdownEntry { tool_name: row.get(0)?, count: row.get(1)? })
+            })
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Top read files
+        let mut stmt = conn.prepare(
+            "SELECT file_path, times_read, estimated_tokens FROM file_anatomy \
+             WHERE (?1 = '' OR project = ?1) ORDER BY times_read DESC LIMIT 10"
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let top_read_files: Vec<FileStatsEntry> = stmt
+            .query_map([&Param::Text(project.clone())], |row| {
+                Ok(FileStatsEntry { file_path: row.get(0)?, count: row.get(1)?, estimated_tokens: row.get(2)? })
+            })
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Top written files
+        let mut stmt = conn.prepare(
+            "SELECT file_path, times_written, estimated_tokens FROM file_anatomy \
+             WHERE (?1 = '' OR project = ?1) AND times_written > 0 ORDER BY times_written DESC LIMIT 10"
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let top_written_files: Vec<FileStatsEntry> = stmt
+            .query_map([&Param::Text(project.clone())], |row| {
+                Ok(FileStatsEntry { file_path: row.get(0)?, count: row.get(1)?, estimated_tokens: row.get(2)? })
+            })
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Bug count in period
+        let bug_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM bugs WHERE created_at >= datetime('now', ?1) AND (?2 = '' OR project = ?2)",
+            rusqlite::params_from_iter(&params),
+            |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        // Bugs by file (top 5)
+        let mut stmt = conn.prepare(
+            "SELECT file_path, COUNT(*) as cnt FROM bugs \
+             WHERE file_path IS NOT NULL AND (?1 = '' OR project = ?1) \
+             GROUP BY file_path ORDER BY cnt DESC LIMIT 5"
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let bugs_by_file: Vec<FileBugCount> = stmt
+            .query_map([&Param::Text(project.clone())], |row| {
+                Ok(FileBugCount { file_path: row.get(0)?, bug_count: row.get(1)? })
+            })
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // --- Savings ---
+        let files_with_anatomy: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM file_anatomy WHERE (?1 = '' OR project = ?1)",
+            [&Param::Text(project.clone())],
+            |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let total_file_reads: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM session_reads", [], |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let repeated_reads: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM (SELECT session_id, file_path FROM session_reads \
+             GROUP BY session_id, file_path HAVING COUNT(*) > 1)",
+            [], |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let saveable: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(token_estimate), 0) FROM session_reads \
+             WHERE id NOT IN (SELECT MIN(id) FROM session_reads GROUP BY session_id, file_path)",
+            [], |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        // --- Memory Health ---
+        let mut stmt = conn.prepare(
+            "SELECT category, COUNT(*) FROM context_items \
+             WHERE (?1 = '' OR project = ?1) GROUP BY category ORDER BY COUNT(*) DESC"
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let context_items_by_category: Vec<CategoryCount> = stmt
+            .query_map([&Param::Text(project.clone())], |row| {
+                Ok(CategoryCount { category: row.get(0)?, count: row.get(1)? })
+            })
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let total_dnr: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM do_not_repeat WHERE (?1 = '' OR project = ?1)",
+            [&Param::Text(project.clone())],
+            |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let total_bugs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM bugs WHERE (?1 = '' OR project = ?1)",
+            [&Param::Text(project.clone())],
+            |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let oldest_context: Option<String> = conn.query_row(
+            "SELECT MIN(created_at) FROM context_items WHERE (?1 = '' OR project = ?1)",
+            [&Param::Text(project.clone())],
+            |row| row.get(0),
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        // Projects with context vs without
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT project FROM context_items WHERE project IS NOT NULL"
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let projects_with: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL \
+             AND project NOT IN (SELECT DISTINCT project FROM context_items WHERE project IS NOT NULL)"
+        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let projects_without: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(Json(AnalyticsReport {
+            period_days: days,
+            project: input.project,
+            total_sessions,
+            total_input_tokens: total_input,
+            total_output_tokens: total_output,
+            total_cache_read_tokens: cache_read,
+            tool_call_breakdown,
+            top_read_files,
+            top_written_files,
+            bug_count,
+            bugs_by_file,
+            files_with_anatomy,
+            total_file_reads,
+            repeated_reads_detected: repeated_reads,
+            estimated_tokens_saveable: saveable,
+            context_items_by_category,
+            total_do_not_repeat_rules: total_dnr,
+            total_bugs_logged: total_bugs,
+            oldest_context_item: oldest_context,
+            projects_with_context: projects_with,
+            projects_without_context: projects_without,
+        }))
+    }
 }
 
 #[tool_handler]
@@ -1015,5 +1306,121 @@ mod tests {
         })).unwrap();
         assert_eq!(list.results.len(), 1);
         assert_eq!(list.results[0].tool_name, "Edit");
+    }
+
+    // --- Analytics tool tests ---
+
+    #[test]
+    fn test_get_token_stats_empty() {
+        let server = test_server();
+        let Json(report) = server.get_token_stats(Parameters(GetTokenStatsInput {
+            project: None,
+            days: Some(30),
+        })).unwrap();
+        assert_eq!(report.total_sessions, 0);
+        assert_eq!(report.total_input_tokens, 0);
+        assert_eq!(report.total_output_tokens, 0);
+        assert!(report.top_sessions_by_tokens.is_empty());
+    }
+
+    #[test]
+    fn test_get_token_stats_with_data() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) \
+                VALUES ('ts1', 'proj', datetime('now'), 10, 5000, 3000)", []).unwrap();
+            conn.execute("INSERT INTO messages (uuid, session_id, role, content_type, content) \
+                VALUES ('tu1', 'ts1', 'assistant', 'text', 'response')", []).unwrap();
+            conn.execute("INSERT INTO token_usage (message_uuid, session_id, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) \
+                VALUES ('tu1', 'ts1', 5000, 3000, 1000, 500)", []).unwrap();
+            conn.execute("INSERT INTO file_anatomy (project, file_path, description, estimated_tokens, times_read, times_written, last_scanned) \
+                VALUES ('proj', 'src/main.rs', 'Main entry', 200, 3, 1, datetime('now'))", []).unwrap();
+            // Two reads of the same file in the same session → one repeated read
+            conn.execute("INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) VALUES ('ts1', 'src/main.rs', datetime('now', '-2 minutes'), 200)", []).unwrap();
+            conn.execute("INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) VALUES ('ts1', 'src/main.rs', datetime('now'), 200)", []).unwrap();
+        }
+        let Json(report) = server.get_token_stats(Parameters(GetTokenStatsInput {
+            project: Some("proj".to_string()),
+            days: Some(7),
+        })).unwrap();
+        assert_eq!(report.total_sessions, 1);
+        assert_eq!(report.total_input_tokens, 5000);
+        assert_eq!(report.total_output_tokens, 3000);
+        assert_eq!(report.total_cache_read_tokens, 1000);
+        assert_eq!(report.avg_input_per_session, 5000);
+        assert_eq!(report.files_with_anatomy, 1);
+        assert_eq!(report.total_file_reads, 2);
+        assert_eq!(report.repeated_reads_warned, 1);
+        assert_eq!(report.estimated_tokens_saveable, 200);
+        assert_eq!(report.top_sessions_by_tokens.len(), 1);
+        assert_eq!(report.top_sessions_by_tokens[0].total_tokens, 8000);
+    }
+
+    #[test]
+    fn test_get_analytics_empty() {
+        let server = test_server();
+        let Json(report) = server.get_analytics(Parameters(GetAnalyticsInput {
+            project: None,
+            days: Some(30),
+        })).unwrap();
+        assert_eq!(report.total_sessions, 0);
+        assert!(report.tool_call_breakdown.is_empty());
+        assert!(report.top_read_files.is_empty());
+        assert!(report.context_items_by_category.is_empty());
+        assert!(report.projects_with_context.is_empty());
+    }
+
+    #[test]
+    fn test_get_analytics_with_data() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            // Session + messages
+            conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) \
+                VALUES ('a1', 'proj', datetime('now'), 5, 2000, 1000)", []).unwrap();
+            conn.execute("INSERT INTO messages (uuid, session_id, role, content_type, content) \
+                VALUES ('m1', 'a1', 'assistant', 'tool_use', 'reading file')", []).unwrap();
+            // Tool calls
+            conn.execute("INSERT INTO tool_calls (message_uuid, session_id, tool_name, file_path, timestamp) \
+                VALUES ('m1', 'a1', 'Read', 'src/lib.rs', datetime('now'))", []).unwrap();
+            conn.execute("INSERT INTO tool_calls (message_uuid, session_id, tool_name, file_path, timestamp) \
+                VALUES ('m1', 'a1', 'Read', 'src/main.rs', datetime('now'))", []).unwrap();
+            conn.execute("INSERT INTO tool_calls (message_uuid, session_id, tool_name, file_path, timestamp) \
+                VALUES ('m1', 'a1', 'Edit', 'src/main.rs', datetime('now'))", []).unwrap();
+            // Anatomy
+            conn.execute("INSERT INTO file_anatomy (project, file_path, description, estimated_tokens, times_read, times_written, last_scanned) \
+                VALUES ('proj', 'src/main.rs', 'Entry point', 150, 5, 2, datetime('now'))", []).unwrap();
+            // Bugs
+            conn.execute("INSERT INTO bugs (project, error_message, fix_description, file_path, created_at) \
+                VALUES ('proj', 'null ref', 'add check', 'src/main.rs', datetime('now'))", []).unwrap();
+            // Context
+            conn.execute("INSERT INTO context_items (project, category, content, created_at) \
+                VALUES ('proj', 'architecture', 'uses arena allocators', datetime('now'))", []).unwrap();
+            conn.execute("INSERT INTO context_items (project, category, content, created_at) \
+                VALUES ('proj', 'conventions', 'snake_case everywhere', datetime('now'))", []).unwrap();
+            // Do-not-repeat
+            conn.execute("INSERT INTO do_not_repeat (project, rule, created_at) \
+                VALUES ('proj', 'no Vec<u8> for delta', datetime('now'))", []).unwrap();
+            // Another project with sessions but no context
+            conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) \
+                VALUES ('a2', 'orphan', datetime('now'), 1, 100, 50)", []).unwrap();
+        }
+        let Json(report) = server.get_analytics(Parameters(GetAnalyticsInput {
+            project: None,
+            days: Some(30),
+        })).unwrap();
+        assert_eq!(report.total_sessions, 2);
+        assert!(!report.tool_call_breakdown.is_empty());
+        assert_eq!(report.tool_call_breakdown[0].tool_name, "Read");
+        assert_eq!(report.tool_call_breakdown[0].count, 2);
+        assert_eq!(report.bug_count, 1);
+        assert_eq!(report.bugs_by_file.len(), 1);
+        assert_eq!(report.context_items_by_category.len(), 2);
+        assert_eq!(report.total_do_not_repeat_rules, 1);
+        assert_eq!(report.total_bugs_logged, 1);
+        assert!(report.oldest_context_item.is_some());
+        assert!(report.projects_with_context.contains(&"proj".to_string()));
+        assert!(report.projects_without_context.contains(&"orphan".to_string()));
     }
 }

@@ -233,3 +233,104 @@ pub struct BugResultList {
 pub struct DoNotRepeatList {
     pub results: Vec<DoNotRepeatResult>,
 }
+
+// --- Analytics Input/Output ---
+
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct GetTokenStatsInput {
+    /// Filter by project name
+    pub project: Option<String>,
+    /// Number of days to look back (default 30)
+    pub days: Option<i64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TokenStatsReport {
+    pub period_days: i64,
+    pub project: Option<String>,
+    // Usage
+    pub total_sessions: i64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cache_creation_tokens: i64,
+    pub avg_input_per_session: i64,
+    pub avg_output_per_session: i64,
+    // Savings
+    pub files_with_anatomy: i64,
+    pub total_file_reads: i64,
+    pub repeated_reads_warned: i64,
+    pub estimated_tokens_saveable: i64,
+    // Top consumers
+    pub top_sessions_by_tokens: Vec<TokenSessionEntry>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TokenSessionEntry {
+    pub session_id: String,
+    pub project: Option<String>,
+    pub total_tokens: i64,
+    pub start_time: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct GetAnalyticsInput {
+    /// Filter by project name
+    pub project: Option<String>,
+    /// Number of days to look back (default 30)
+    pub days: Option<i64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AnalyticsReport {
+    pub period_days: i64,
+    pub project: Option<String>,
+    // Usage
+    pub total_sessions: i64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    // Productivity
+    pub tool_call_breakdown: Vec<ToolBreakdownEntry>,
+    pub top_read_files: Vec<FileStatsEntry>,
+    pub top_written_files: Vec<FileStatsEntry>,
+    pub bug_count: i64,
+    pub bugs_by_file: Vec<FileBugCount>,
+    // Savings
+    pub files_with_anatomy: i64,
+    pub total_file_reads: i64,
+    pub repeated_reads_detected: i64,
+    pub estimated_tokens_saveable: i64,
+    // Memory health
+    pub context_items_by_category: Vec<CategoryCount>,
+    pub total_do_not_repeat_rules: i64,
+    pub total_bugs_logged: i64,
+    pub oldest_context_item: Option<String>,
+    pub projects_with_context: Vec<String>,
+    pub projects_without_context: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ToolBreakdownEntry {
+    pub tool_name: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FileStatsEntry {
+    pub file_path: String,
+    pub count: i64,
+    pub estimated_tokens: Option<i64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FileBugCount {
+    pub file_path: String,
+    pub bug_count: i64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CategoryCount {
+    pub category: String,
+    pub count: i64,
+}
