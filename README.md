@@ -7,7 +7,7 @@ Mnemosyne gives Claude Code persistent, queryable memory across sessions by inge
 ## What It Does
 
 - **Ingests session transcripts** — Parses Claude Code's JSONL transcript files into a structured SQLite database with full-text search
-- **Provides MCP tools** — 11 tools for searching past sessions, saving context, logging bugs, and managing do-not-repeat rules
+- **Provides MCP tools** — 13 tools for searching past sessions, saving context, logging bugs, and managing do-not-repeat rules
 - **Real-time hooks** — Warns before re-reading files already read this session, and checks bugs/do-not-repeat rules before writes
 - **Cross-session knowledge** — Decisions, bugs, and context persist so Claude doesn't re-learn the same things every session
 
@@ -318,6 +318,76 @@ Claude: calls get_session_detail({ session_id: "74810b85-..." })
              tool call summary (Read: 12, Edit: 5, Bash: 3)
 ```
 
+#### Token Stats
+
+```
+Claude: calls get_token_stats({ project: "mnemosyne", days: 7 })
+  → Returns:
+    {
+      "period_days": 7,
+      "project": "mnemosyne",
+      "total_sessions": 12,
+      "total_input_tokens": 847200,
+      "total_output_tokens": 423100,
+      "total_cache_read_tokens": 312000,
+      "total_cache_creation_tokens": 98400,
+      "avg_input_per_session": 70600,
+      "avg_output_per_session": 35258,
+      "files_with_anatomy": 14,
+      "total_file_reads": 187,
+      "repeated_reads_warned": 23,
+      "estimated_tokens_saveable": 27600,
+      "top_sessions_by_tokens": [
+        { "session_id": "74810b85-...", "project": "mnemosyne", "total_tokens": 142300, "start_time": "2026-04-09..." }
+      ]
+    }
+```
+
+#### Full Analytics Report
+
+```
+Claude: calls get_analytics({ days: 30 })
+  → Returns:
+    {
+      "period_days": 30,
+      "total_sessions": 45,
+      "total_input_tokens": 3200000,
+      "total_output_tokens": 1600000,
+      "total_cache_read_tokens": 980000,
+      "tool_call_breakdown": [
+        { "tool_name": "Read", "count": 412 },
+        { "tool_name": "Edit", "count": 187 },
+        { "tool_name": "Bash", "count": 156 },
+        { "tool_name": "Grep", "count": 98 }
+      ],
+      "top_read_files": [
+        { "file_path": "src/main.rs", "count": 34, "estimated_tokens": 850 },
+        { "file_path": "src/parser/pack.rs", "count": 28, "estimated_tokens": 1200 }
+      ],
+      "top_written_files": [
+        { "file_path": "src/main.rs", "count": 22, "estimated_tokens": 850 }
+      ],
+      "bug_count": 8,
+      "bugs_by_file": [
+        { "file_path": "src/parser/pack.rs", "bug_count": 3 }
+      ],
+      "files_with_anatomy": 14,
+      "total_file_reads": 412,
+      "repeated_reads_detected": 47,
+      "estimated_tokens_saveable": 56400,
+      "context_items_by_category": [
+        { "category": "architecture", "count": 7 },
+        { "category": "performance", "count": 4 },
+        { "category": "conventions", "count": 3 }
+      ],
+      "total_do_not_repeat_rules": 5,
+      "total_bugs_logged": 12,
+      "oldest_context_item": "2026-04-05T19:52:13Z",
+      "projects_with_context": ["mnemosyne", "git_dag_analyzer"],
+      "projects_without_context": ["alarm-to-speech"]
+    }
+```
+
 ---
 
 ## MCP Tools Reference
@@ -335,6 +405,8 @@ Claude: calls get_session_detail({ session_id: "74810b85-..." })
 | `search_bugs` | read | FTS5 search on logged bugs, with optional tag filtering |
 | `add_do_not_repeat` | write | Add a rule for something to avoid, scoped to project and/or file |
 | `get_do_not_repeat` | read | List do-not-repeat rules, filtered by project and/or file |
+| `get_token_stats` | analytics | Token usage, cache utilization, savings estimates, and top sessions |
+| `get_analytics` | analytics | Comprehensive report: usage, productivity, savings, and memory health |
 
 ## Hook Behavior
 
@@ -372,6 +444,6 @@ SQLite database is stored at `~/.claude/memory/memory.db` with WAL mode enabled 
 ## Run Tests
 
 ```bash
-cargo test          # 67 tests across all 4 crates
+cargo test          # 71 tests across all 4 crates
 cargo test -- -q    # quiet output, just pass/fail
 ```

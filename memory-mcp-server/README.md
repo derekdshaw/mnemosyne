@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server that gives Claude Code queryable access to t
 
 ## Purpose
 
-This server runs over stdio and exposes 11 tools that Claude can call during a session to search past conversations, save project context, log bugs, and manage do-not-repeat rules. It connects to the same SQLite database populated by `session-ingester` and `memory-hooks`.
+This server runs over stdio and exposes 13 tools that Claude can call during a session to search past conversations, save project context, log bugs, manage do-not-repeat rules, and view analytics. It connects to the same SQLite database populated by `session-ingester` and `memory-hooks`.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ main.rs
 ├── MnemosyneServer struct
 │   ├── Mutex<Connection>  — SQLite connection (thread-safe)
 │   └── ToolRouter<Self>   — rmcp tool dispatch
-├── #[tool_router] impl    — 11 tool methods with SQL queries
+├── #[tool_router] impl    — 13 tool methods with SQL queries
 ├── #[tool_handler] impl   — ServerHandler trait (initialize, list_tools, call_tool)
 └── main()                 — Opens DB, starts stdio transport via rmcp
 
@@ -45,6 +45,13 @@ tools.rs
 | `add_do_not_repeat` | rule, reason?, project?, file_path? | Add a do-not-repeat rule |
 | `get_do_not_repeat` | project?, file_path? | List active do-not-repeat rules |
 
+**Analytics:**
+
+| Tool | Input | Description |
+|------|-------|-------------|
+| `get_token_stats` | project?, days? | Token usage, cache stats, savings estimates, top sessions |
+| `get_analytics` | project?, days? | Comprehensive report: usage, productivity, savings, memory health |
+
 ### MCP Protocol
 
 Uses the [rmcp](https://crates.io/crates/rmcp) crate (v1.3) with newline-delimited JSON-RPC over stdio. Claude Code manages the server lifecycle — starting it when a session begins and stopping it when the session ends.
@@ -69,7 +76,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 ## Test
 
 ```bash
-cargo test -p memory-mcp-server   # 18 tests covering all 11 tools + helper functions
+cargo test -p memory-mcp-server   # 22 tests covering all 13 tools + helper functions
 ```
 
 ## Configuration
