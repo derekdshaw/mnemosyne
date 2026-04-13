@@ -7,7 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PROJECT_NAME: mnemosyne
 
 jobs:
   build:
@@ -18,27 +17,27 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: ${{ env.PROJECT_NAME }}
+            bin: mnemosyne
             archive: tar.gz
 
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: ${{ env.PROJECT_NAME }}
+            bin: mnemosyne
             archive: tar.gz
 
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: ${{ env.PROJECT_NAME }}
+            bin: mnemosyne
             archive: tar.gz
 
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: ${{ env.PROJECT_NAME }}
+            bin: mnemosyne
             archive: tar.gz
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: ${{ env.PROJECT_NAME }}.exe
+            bin: mnemosyne.exe
             archive: zip
 
     steps:
@@ -74,18 +73,24 @@ jobs:
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
-          ARCHIVE="${{ env.PROJECT_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
-          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} .
-          tar -czf "$ARCHIVE" "${{ matrix.artifact }}"
+          ARCHIVE="${{ matrix.bin }}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          mkdir dist
+          cp target/${{ matrix.target }}/release/memory-hooks dist/
+          cp target/${{ matrix.target }}/release/memory-mcp-server dist/
+          cp target/${{ matrix.target }}/release/session-ingester dist/
+          tar -czf "$ARCHIVE" -C dist .
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
 
       - name: Package (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $archive = "${{ env.PROJECT_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          Copy-Item "target\${{ matrix.target }}\release\${{ matrix.artifact }}" .
-          Compress-Archive -Path "${{ matrix.artifact }}" -DestinationPath $archive
+          $archive = "${{ matrix.bin }}-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Path dist
+          Copy-Item "target\${{ matrix.target }}\release\memory-hooks.exe" dist\
+          Copy-Item "target\${{ matrix.target }}\release\memory-mcp-server.exe" dist\
+          Copy-Item "target\${{ matrix.target }}\release\session-ingester.exe" dist\
+          Compress-Archive -Path "dist\*" -DestinationPath $archive
           echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
 
       - name: Upload artifact
