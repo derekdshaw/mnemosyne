@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PROJECT_NAME: your-binary-name  # <-- change this to your binary name
+  PROJECT_NAME: mnemosyne
 
 jobs:
   build:
