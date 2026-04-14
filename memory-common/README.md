@@ -55,3 +55,25 @@ cargo test -p memory-common
 ```
 
 34 tests covering database creation, migration idempotency, schema version skip, JSONL parsing (user messages, assistant messages, tool results, array content, missing usage, thinking block truncation, skip types, malformed lines), file path extraction, tool input summaries, path normalization, UTF-8 truncation (ASCII, emoji, CJK, empty, boundary), and anatomy extraction (Rust, Python, TypeScript, Java, Go, Markdown, TOML, empty, fallback).
+
+## Database Schema
+
+SQLite database is stored at `~/.claude/memory/memory.db` with WAL mode enabled for concurrent access from multiple agents.
+
+### Tables
+
+**Ingestion tables** (populated from JSONL transcripts):
+- `sessions` — Session metadata (project, timestamps, token totals)
+- `messages` — All user/assistant messages with full-text search via `messages_fts`
+- `tool_calls` — Tool invocations with file paths and input summaries
+- `token_usage` — Per-message token counts
+- `ingestion_log` — Tracks which files have been ingested (with size/mtime for incremental updates)
+
+**Context tables** (read-write via MCP tools):
+- `context_items` — Saved knowledge with categories, searchable via `context_fts`
+- `bugs` — Logged bugs with error messages and fixes, searchable via `bugs_fts`
+- `do_not_repeat` — Rules for mistakes to avoid, queried by exact project/file match
+
+**Hook tables** (populated by real-time hooks):
+- `file_anatomy` — Per-project file index with content-aware descriptions (doc comments, public signatures, exports), token estimates, and read/write counts
+- `session_reads` — Files read in the current session (for repeated-read detection)
