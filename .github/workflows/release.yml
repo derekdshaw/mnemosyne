@@ -78,6 +78,8 @@ jobs:
           cp target/${{ matrix.target }}/release/memory-hooks dist/
           cp target/${{ matrix.target }}/release/memory-mcp-server dist/
           cp target/${{ matrix.target }}/release/session-ingester dist/
+          cp README.md dist/
+          cp -r scripts dist/
           tar -czf "$ARCHIVE" -C dist .
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
 
@@ -90,6 +92,8 @@ jobs:
           Copy-Item "target\${{ matrix.target }}\release\memory-hooks.exe" dist\
           Copy-Item "target\${{ matrix.target }}\release\memory-mcp-server.exe" dist\
           Copy-Item "target\${{ matrix.target }}\release\session-ingester.exe" dist\
+          Copy-Item "README.md" dist\
+          Copy-Item "scripts" dist\ -Recurse
           Compress-Archive -Path "dist\*" -DestinationPath $archive
           echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
 
