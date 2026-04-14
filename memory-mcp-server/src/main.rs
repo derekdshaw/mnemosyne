@@ -10,7 +10,7 @@ mod tools;
 use anyhow::Result;
 use memory_common::db::{self, truncate_utf8};
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::ServerInfo;
+use rmcp::model::{ServerInfo, ToolsCapability};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use rusqlite::types::{ToSql, ToSqlOutput};
 use rusqlite::Connection;
@@ -1063,6 +1063,7 @@ impl ServerHandler for MnemosyneServer {
         let mut info = ServerInfo::default();
         info.server_info.name = "mnemosyne".into();
         info.server_info.version = "0.1.0".into();
+        info.capabilities.tools = Some(ToolsCapability::default());
         info.instructions = Some(
             "Mnemosyne: Claude Code session memory system. Search past sessions, \
             save context, log bugs, and manage do-not-repeat rules."
