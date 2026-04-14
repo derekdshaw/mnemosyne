@@ -7,7 +7,6 @@ $ErrorActionPreference = "Stop"
 $Binaries = @("session-ingester.exe", "memory-mcp-server.exe", "memory-hooks.exe")
 $ClaudeDir = "$env:USERPROFILE\.claude"
 $SettingsFile = "$ClaudeDir\settings.json"
-$McpFile = "$ClaudeDir\.mcp.json"
 
 function Write-Info($msg)  { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)    { Write-Host " OK $msg" -ForegroundColor Green }
@@ -182,31 +181,17 @@ foreach ($event in $hooksConfig.Keys) {
 $settings | ConvertTo-Json -Depth 10 | Set-Content $SettingsFile -Encoding UTF8
 Write-Ok "Updated $SettingsFile"
 
-# --- Configure MCP server ---
+# --- Register MCP server (user-level, available in all projects) ---
 
-Write-Info "Configuring MCP server"
+Write-Info "Registering MCP server"
 
-$mcp = @{}
-if (Test-Path $McpFile) {
-    try {
-        $mcp = Get-Content $McpFile -Raw | ConvertFrom-Json -AsHashtable
-    }
-    catch {
-        $mcp = @{}
-    }
+$claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
+if (-not $claudeCmd) {
+    Write-Err "Claude Code CLI ('claude') not found on PATH. Install it first: https://docs.anthropic.com/en/docs/claude-code"
 }
 
-if (-not $mcp.ContainsKey("mcpServers")) {
-    $mcp["mcpServers"] = @{}
-}
-
-$mcp["mcpServers"]["mnemosyne"] = @{
-    command = $McpServer
-    args = @()
-}
-
-$mcp | ConvertTo-Json -Depth 10 | Set-Content $McpFile -Encoding UTF8
-Write-Ok "Updated $McpFile"
+& claude mcp add --scope user --transport stdio mnemosyne $McpServer
+Write-Ok "Registered mnemosyne MCP server (user-level)"
 
 # --- Seed database ---
 
@@ -228,7 +213,7 @@ Write-Host "Mnemosyne installed successfully!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Binaries:  $InstallDir"
 Write-Host "Settings:  $SettingsFile"
-Write-Host "MCP:       $McpFile"
+Write-Host "MCP:       ~/.claude.json (user-level)"
 Write-Host "Database:  ~/.claude/memory/memory.db"
 Write-Host ""
 Write-Host "Next step: " -ForegroundColor Cyan -NoNewline

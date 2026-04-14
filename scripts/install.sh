@@ -7,7 +7,6 @@ set -euo pipefail
 BINARIES=("session-ingester" "memory-mcp-server" "memory-hooks")
 CLAUDE_DIR="$HOME/.claude"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
-MCP_FILE="$CLAUDE_DIR/.mcp.json"
 
 # Colors
 RED='\033[0;31m'
@@ -191,38 +190,17 @@ PYEOF
 
 ok "Updated $SETTINGS_FILE"
 
-# --- Configure MCP server ---
+# --- Register MCP server (user-level, available in all projects) ---
 
-info "Configuring MCP server"
+info "Registering MCP server"
 
-$PYTHON - "$MCP_FILE" "$MCP_SERVER" <<'PYEOF'
-import json, sys, os
+if ! command -v claude &>/dev/null; then
+    err "Claude Code CLI ('claude') not found on PATH. Install it first: https://docs.anthropic.com/en/docs/claude-code"
+fi
 
-mcp_path = sys.argv[1]
-server = sys.argv[2]
+claude mcp add --scope user --transport stdio mnemosyne "$MCP_SERVER"
 
-mcp = {}
-if os.path.exists(mcp_path):
-    with open(mcp_path) as f:
-        try:
-            mcp = json.load(f)
-        except json.JSONDecodeError:
-            mcp = {}
-
-if "mcpServers" not in mcp:
-    mcp["mcpServers"] = {}
-
-mcp["mcpServers"]["mnemosyne"] = {
-    "command": server,
-    "args": []
-}
-
-with open(mcp_path, "w") as f:
-    json.dump(mcp, f, indent=2)
-    f.write("\n")
-PYEOF
-
-ok "Updated $MCP_FILE"
+ok "Registered mnemosyne MCP server (user-level)"
 
 # --- Seed database ---
 
@@ -239,7 +217,7 @@ printf "${GREEN}${BOLD}Mnemosyne installed successfully!${RESET}\n"
 echo ""
 echo "Binaries:  $INSTALL_DIR"
 echo "Settings:  $SETTINGS_FILE"
-echo "MCP:       $MCP_FILE"
+echo "MCP:       ~/.claude.json (user-level)"
 echo "Database:  ~/.claude/memory/memory.db"
 echo ""
 printf "${CYAN}${BOLD}Next step:${RESET} Add memory guidance to your project's CLAUDE.md.\n"

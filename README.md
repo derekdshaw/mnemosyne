@@ -78,7 +78,7 @@ cargo build --release
 
 ### Run the Install Script
 
-The install script copies binaries to a standard location, registers the MCP server, configures Claude Code hooks, and seeds the database.
+The install script copies binaries to a standard location, registers the MCP server at the user level (available in all projects), configures Claude Code hooks, and seeds the database.
 
 **macOS / Linux:**
 

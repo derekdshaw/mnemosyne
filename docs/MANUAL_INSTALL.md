@@ -23,7 +23,21 @@ Copy these to a directory on your PATH (e.g. `~/.local/bin/`, `/usr/local/bin/`,
 
 ## Register the MCP Server
 
-Create or edit `~/.claude/.mcp.json`:
+Register mnemosyne as a **user-level** MCP server so it's available in all projects:
+
+```bash
+claude mcp add --scope user --transport stdio mnemosyne /absolute/path/to/memory-mcp-server
+```
+
+This stores the server configuration in `~/.claude.json`. You can verify it was added:
+
+```bash
+claude mcp list
+```
+
+### Per-Project Setup (Optional)
+
+If you prefer to enable mnemosyne only for a specific project instead of globally, create a `.mcp.json` file in the project root:
 
 ```json
 {
@@ -35,6 +49,16 @@ Create or edit `~/.claude/.mcp.json`:
   }
 }
 ```
+
+Claude Code will prompt you to approve the server the first time it's used. To auto-approve it, add to `~/.claude/settings.json`:
+
+```json
+{
+  "enabledMcpjsonServers": ["mnemosyne"]
+}
+```
+
+> **Note:** The install script uses user-level registration by default. Use the per-project approach only if you need mnemosyne in some projects but not others.
 
 ## Register the Hooks
 
