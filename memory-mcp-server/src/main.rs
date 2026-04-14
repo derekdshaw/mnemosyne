@@ -10,7 +10,6 @@ mod tools;
 use anyhow::Result;
 use memory_common::db::{self, truncate_utf8};
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{ServerInfo, ToolsCapability};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use rusqlite::types::{ToSql, ToSqlOutput};
 use rusqlite::Connection;
@@ -61,7 +60,6 @@ struct MnemosyneServer {
     // return PoisonError, which we map to MCP error responses — the server degrades
     // gracefully rather than crashing, but DB operations stop working.
     db: Mutex<Connection>,
-    tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
 #[tool_router]
@@ -1057,28 +1055,17 @@ impl MnemosyneServer {
     }
 }
 
-#[tool_handler]
-impl ServerHandler for MnemosyneServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
-        info.server_info.name = "mnemosyne".into();
-        info.server_info.version = "0.1.0".into();
-        info.capabilities.tools = Some(ToolsCapability::default());
-        info.instructions = Some(
-            "Mnemosyne: Claude Code session memory system. Search past sessions, \
-            save context, log bugs, and manage do-not-repeat rules."
-                .into(),
-        );
-        info
-    }
-}
+#[tool_handler(
+    name = "mnemosyne",
+    instructions = "Mnemosyne: Claude Code session memory system. Search past sessions, save context, log bugs, and manage do-not-repeat rules."
+)]
+impl ServerHandler for MnemosyneServer {}
 
 impl MnemosyneServer {
     #[cfg(test)]
     fn new_with_conn(conn: Connection) -> Self {
         Self {
             db: Mutex::new(conn),
-            tool_router: Self::tool_router(),
         }
     }
 
@@ -1086,7 +1073,6 @@ impl MnemosyneServer {
         let conn = db::open_db()?;
         Ok(Self {
             db: Mutex::new(conn),
-            tool_router: Self::tool_router(),
         })
     }
 }

@@ -62,7 +62,7 @@ jobs:
       - name: Get current version
         id: current
         run: |
-          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          VERSION=$(sed -n '/\[workspace\.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' Cargo.toml)
           echo "version=v$VERSION" >> $GITHUB_OUTPUT
 
       - name: Check if tag already exists
@@ -78,7 +78,7 @@ jobs:
         id: previous
         if: steps.tag_exists.outputs.exists == 'false'
         run: |
-          PREV=$(git show HEAD~1:Cargo.toml | grep '^version' | head -1 | sed 's/version = "\(.*\)"/\1/')
+          PREV=$(git show HEAD~1:Cargo.toml | sed -n '/\[workspace\.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}')
           echo "version=v$PREV" >> $GITHUB_OUTPUT
 
       - name: Create tag if version changed

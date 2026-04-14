@@ -6,3 +6,26 @@ members = [
     "memory-hooks",
 ]
 resolver = "2"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/derekdshaw/mnemosyne"
+description = "Session memory system for Claude Code"
+
+[workspace.dependencies]
+rusqlite = { version = "0.39", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+tokio = { version = "1", features = ["full"] }
+rmcp = { version = "1.4", features = ["server", "transport-io"] }
+schemars = "1.2"
+glob = "0.3"
+memory-common = { path = "memory-common" }
