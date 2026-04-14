@@ -1,9 +1,11 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0)'
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,31 +19,28 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            bin: mnemosyne
             archive: tar.gz
 
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            bin: mnemosyne
             archive: tar.gz
 
           - target: x86_64-apple-darwin
             os: macos-latest
-            bin: mnemosyne
             archive: tar.gz
 
           - target: aarch64-apple-darwin
             os: macos-latest
-            bin: mnemosyne
             archive: tar.gz
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            bin: mnemosyne.exe
             archive: zip
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -73,7 +72,7 @@ jobs:
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
-          ARCHIVE="${{ matrix.bin }}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          ARCHIVE="mnemosyne-${{ inputs.tag }}-${{ matrix.target }}.tar.gz"
           mkdir dist
           cp target/${{ matrix.target }}/release/memory-hooks dist/
           cp target/${{ matrix.target }}/release/memory-mcp-server dist/
@@ -87,7 +86,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $archive = "${{ matrix.bin }}-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          $archive = "mnemosyne-${{ inputs.tag }}-${{ matrix.target }}.zip"
           New-Item -ItemType Directory -Path dist
           Copy-Item "target\${{ matrix.target }}\release\memory-hooks.exe" dist\
           Copy-Item "target\${{ matrix.target }}\release\memory-mcp-server.exe" dist\
@@ -100,11 +99,11 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PROJECT_NAME }}-${{ matrix.target }}
+          name: mnemosyne-${{ matrix.target }}
           path: ${{ env.ARCHIVE }}
 
   release:
-    name: Create Release
+    name: Create GitHub release
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -122,7 +121,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag }}
           files: artifacts/*
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(inputs.tag, '-') }}

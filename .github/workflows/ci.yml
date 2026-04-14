@@ -46,18 +46,21 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
-  tag-if-version-changed:
-    name: Tag if version changed
+  tag-and-release:
+    name: Tag and release
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.current.outputs.version }}
+      created: ${{ steps.create_tag.outputs.created }}
 
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # need full history to compare
+          fetch-depth: 0
 
       - name: Get current version
         id: current
@@ -82,6 +85,7 @@ jobs:
           echo "version=v$PREV" >> $GITHUB_OUTPUT
 
       - name: Create tag if version changed
+        id: create_tag
         if: |
           steps.tag_exists.outputs.exists == 'false' &&
           steps.current.outputs.version != steps.previous.outputs.version
@@ -90,3 +94,120 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag ${{ steps.current.outputs.version }}
           git push origin ${{ steps.current.outputs.version }}
+          echo "created=true" >> $GITHUB_OUTPUT
+
+  build-release:
+    name: Build (${{ matrix.target }})
+    needs: tag-and-release
+    if: needs.tag-and-release.outputs.created == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          ARCHIVE="mnemosyne-${{ needs.tag-and-release.outputs.version }}-${{ matrix.target }}.tar.gz"
+          mkdir dist
+          cp target/${{ matrix.target }}/release/memory-hooks dist/
+          cp target/${{ matrix.target }}/release/memory-mcp-server dist/
+          cp target/${{ matrix.target }}/release/session-ingester dist/
+          cp README.md dist/
+          cp -r scripts dist/
+          tar -czf "$ARCHIVE" -C dist .
+          echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $archive = "mnemosyne-${{ needs.tag-and-release.outputs.version }}-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Path dist
+          Copy-Item "target\${{ matrix.target }}\release\memory-hooks.exe" dist\
+          Copy-Item "target\${{ matrix.target }}\release\memory-mcp-server.exe" dist\
+          Copy-Item "target\${{ matrix.target }}\release\session-ingester.exe" dist\
+          Copy-Item "README.md" dist\
+          Copy-Item "scripts" dist\ -Recurse
+          Compress-Archive -Path "dist\*" -DestinationPath $archive
+          echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnemosyne-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+
+  publish-release:
+    name: Create GitHub release
+    needs: [tag-and-release, build-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.tag-and-release.outputs.version }}
+          files: artifacts/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(needs.tag-and-release.outputs.version, '-') }}
