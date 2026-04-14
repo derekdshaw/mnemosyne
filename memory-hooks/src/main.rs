@@ -1,13 +1,15 @@
-//! Real-time hook handlers for Claude Code's PreToolUse and PostToolUse events.
+//! Real-time hook handlers for Claude Code's PreToolUse, PostToolUse, and
+//! SessionStart events.
 //!
 //! A single binary with subcommands for each hook type. Spawned by Claude Code
-//! on every file read/write. All hooks are advisory only — they write warnings
-//! to stderr and always exit 0, never blocking tool execution.
+//! on every file read/write and at session start. All hooks are advisory only —
+//! they write warnings to stderr and always exit 0, never blocking tool execution.
 
 mod post_read;
 mod post_write;
 mod pre_read;
 mod pre_write;
+mod session_start;
 
 use clap::{Parser, Subcommand};
 use memory_common::db;
@@ -34,6 +36,8 @@ enum Command {
     PreWrite,
     /// Update anatomy after file write
     PostWrite,
+    /// Print project summary at session start (do-not-repeat rules, context, bugs)
+    SessionStart,
 }
 
 /// Common fields from Claude Code hook stdin JSON.
@@ -96,6 +100,7 @@ fn main() {
         Command::PostRead => post_read::run(&conn, &hook_input),
         Command::PreWrite => pre_write::run(&conn, &hook_input),
         Command::PostWrite => post_write::run(&conn, &hook_input),
+        Command::SessionStart => session_start::run(&conn, &hook_input),
     };
 
     if let Err(e) = result {

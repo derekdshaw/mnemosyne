@@ -8,7 +8,7 @@ Mnemosyne gives Claude Code persistent, queryable memory across sessions by inge
 
 - **Ingests session transcripts** — Parses Claude Code's JSONL transcript files into a structured SQLite database with full-text search
 - **Provides MCP tools** — 13 tools for searching past sessions, saving context, logging bugs, and managing do-not-repeat rules
-- **Real-time hooks** — Warns before re-reading files already read this session, and checks bugs/do-not-repeat rules before writes
+- **Real-time hooks** — Injects session briefing at startup, warns before re-reading files, and checks bugs/do-not-repeat rules before writes
 - **Cross-session knowledge** — Decisions, bugs, and context persist so Claude doesn't re-learn the same things every session
 
 ## Architecture
@@ -20,12 +20,17 @@ Mnemosyne gives Claude Code persistent, queryable memory across sessions by inge
 └───────────┬─────────────┘
             │
             ▼
-┌───────────────────────┐     ┌──────────────────────┐
-│ SessionStart/End Hook │────>│  session-ingester     │
-└───────────────────────┘     │  Parses JSONL -> SQLite│
-                              └──────────┬────────────┘
-                                         │
-┌───────────────────────┐                ▼
+┌───────────────────────┐     ┌───────────────────────────┐
+│ SessionStart Hook     │──┬─>│  session-ingester          │
+│                       │  │  │  Parses JSONL -> SQLite     │
+└───────────────────────┘  │  └─────────────┬──────────────┘
+                           │                │
+                           │  ┌─────────────┴──────────────┐
+                           └─>│  memory-hooks session-start │
+                              │  Prints briefing to stdout  │
+                              └─────────────┬──────────────┘
+                                            │
+┌───────────────────────┐                   ▼
 │ PreToolUse/PostToolUse│     ┌──────────────────────┐
 │ Hooks (Read/Write)    │<──>│  SQLite (WAL mode)    │
 └───────────────────────┘     │  ~/.claude/memory/    │
@@ -46,7 +51,7 @@ Mnemosyne gives Claude Code persistent, queryable memory across sessions by inge
 | [memory-common](memory-common/) | (library) | Shared SQLite schema, JSONL parser, data models, path utilities |
 | [session-ingester](session-ingester/) | `session-ingester` | CLI that scans and ingests JSONL transcripts into SQLite |
 | [memory-mcp-server](memory-mcp-server/) | `memory-mcp-server` | MCP server exposing 13 query/write tools over stdio |
-| [memory-hooks](memory-hooks/) | `memory-hooks` | Real-time hook handlers for pre/post read/write events |
+| [memory-hooks](memory-hooks/) | `memory-hooks` | Real-time hook handlers for session start and pre/post read/write events |
 
 ---
 
@@ -103,8 +108,9 @@ Add this to your project's `CLAUDE.md` so Claude uses memory tools proactively:
 ```markdown
 ## Memory (Mnemosyne)
 
-This project uses Mnemosyne for persistent session memory. At the start of each session:
-1. Call `get_project_summary` to load accumulated knowledge, known bugs, and do-not-repeat rules.
+This project uses Mnemosyne for persistent session memory. A session briefing
+(do-not-repeat rules, saved context, recent bugs) is automatically injected
+at startup via the SessionStart hook — no manual tool call needed.
 
 When working:
 - Before exploring unfamiliar code, call `search_sessions` to check if it was discussed before.
@@ -119,7 +125,7 @@ See the [Usage Guide](docs/USAGE.md) for a comprehensive CLAUDE.md example and d
 ## Run Tests
 
 ```bash
-cargo test          # 71 tests across all 4 crates
+cargo test          # 76 tests across all 4 crates
 ```
 
 ## Documentation

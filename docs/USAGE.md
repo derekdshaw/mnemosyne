@@ -4,7 +4,9 @@
 
 These happen automatically without any action from the user:
 
-**Session start** — The ingester runs and processes any new transcripts from completed sessions. This populates the `sessions`, `messages`, `tool_calls`, and `token_usage` tables — making past conversations, tool invocations (with file paths), and token stats queryable by tools like `search_sessions`, `get_file_history`, and `get_session_detail`.
+**Session start** — Two hooks fire automatically:
+1. The **ingester** processes any new transcripts from completed sessions, populating the `sessions`, `messages`, `tool_calls`, and `token_usage` tables.
+2. The **session briefing** (`memory-hooks session-start`) queries the database and prints a summary to stdout, which Claude Code injects into the conversation. This includes do-not-repeat rules (global and project-scoped), saved context items, recent bugs, and session stats — so Claude has full context without needing to manually call `get_project_summary`.
 
 **Session end** — The ingester runs again with `--from-stdin`, immediately ingesting the just-finished session's transcript so other concurrent agents can access it without waiting for a new session to start.
 
@@ -31,8 +33,9 @@ Add guidance to your project's `CLAUDE.md` so Claude uses memory tools proactive
 ```markdown
 ## Memory (Mnemosyne)
 
-This project uses Mnemosyne for persistent session memory. At the start of each session:
-1. Call `get_project_summary` to load accumulated knowledge, known bugs, and do-not-repeat rules.
+This project uses Mnemosyne for persistent session memory. A session briefing
+(do-not-repeat rules, saved context, recent bugs) is automatically injected
+at startup via the SessionStart hook — no manual tool call needed.
 
 When working:
 - Before exploring unfamiliar code, call `search_sessions` to check if it was discussed before.
@@ -48,10 +51,11 @@ When working:
 ## Session Memory (Mnemosyne)
 
 ### Session Start
-Always begin by calling `get_project_summary` to load context from prior sessions.
-Review the returned bugs, do-not-repeat rules, and architecture decisions before
-starting any work. If the summary mentions relevant prior sessions, call
-`get_session_detail` to understand what was done and why.
+A session briefing is automatically injected at startup via the SessionStart hook.
+Review the do-not-repeat rules, saved context, and recent bugs shown in the briefing
+before starting any work. If the briefing mentions relevant prior sessions, call
+`get_session_detail` to understand what was done and why. You can also call
+`get_project_summary` for the full structured data if needed.
 
 ### During Development
 - **Before reading a file**: Check the pre-read hook output. If the anatomy description
@@ -83,10 +87,27 @@ tool calls were made, giving you context before reading git blame.
 
 ### Bootstrapping a Session
 
+The SessionStart hook automatically injects a briefing:
 ```
-Claude: calls get_project_summary("my_project")
-  -> Returns: 3 architecture decisions, 2 known bugs, 1 do-not-repeat rule, token stats
+--- Mnemosyne Session Briefing (my_project) ---
 
+## Do-Not-Repeat Rules
+- Don't use individual Vec<u8> for delta cache — Why: causes drop-time regression [project=my_project]
+
+## Saved Context
+### architecture
+- Using arena allocators for delta cache
+- Tree-diff approach only walks changed subtrees
+
+## Recent Bugs
+- merge commit parsing fails with >2 parents → Fix: handle multi-parent case [src/parser/merge.rs]
+
+## Stats: 12 sessions, 847200 input tokens, 423100 output tokens
+---
+```
+
+Claude sees this automatically and responds:
+```
 Claude: "From past sessions I see we're using arena allocators for delta cache
          and the tree-diff approach only walks changed subtrees. There's a known
          bug with merge commits having >2 parents. What would you like to work on?"

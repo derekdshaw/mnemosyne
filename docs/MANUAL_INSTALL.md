@@ -67,13 +67,22 @@ Add to `~/.claude/settings.json` (merge with existing settings):
 ```json
 {
   "hooks": {
-    "SessionStart": [{
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "/absolute/path/to/session-ingester"
-      }]
-    }],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [{
+          "type": "command",
+          "command": "/absolute/path/to/session-ingester"
+        }]
+      },
+      {
+        "matcher": "",
+        "hooks": [{
+          "type": "command",
+          "command": "/absolute/path/to/memory-hooks session-start"
+        }]
+      }
+    ],
     "SessionEnd": [{
       "matcher": "",
       "hooks": [{

@@ -132,10 +132,16 @@ if os.path.exists(settings_path):
             settings = {}
 
 hooks_config = {
-    "SessionStart": [{
-        "matcher": "",
-        "hooks": [{"type": "command", "command": ingester}]
-    }],
+    "SessionStart": [
+        {
+            "matcher": "",
+            "hooks": [{"type": "command", "command": ingester}]
+        },
+        {
+            "matcher": "",
+            "hooks": [{"type": "command", "command": f"{hooks} session-start"}]
+        }
+    ],
     "SessionEnd": [{
         "matcher": "",
         "hooks": [{"type": "command", "command": f"{ingester} --from-stdin"}]
@@ -229,8 +235,9 @@ echo ""
 cat <<'SNIPPET'
   ## Memory (Mnemosyne)
 
-  This project uses Mnemosyne for persistent session memory. At the start of each session:
-  1. Call `get_project_summary` to load accumulated knowledge, known bugs, and do-not-repeat rules.
+  This project uses Mnemosyne for persistent session memory. A session briefing
+  (do-not-repeat rules, saved context, recent bugs) is automatically injected
+  at startup via the SessionStart hook — no manual tool call needed.
 
   When working:
   - Before exploring unfamiliar code, call `search_sessions` to check if it was discussed before.

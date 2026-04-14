@@ -423,7 +423,7 @@ impl MnemosyneServer {
         let mut stmt = conn
             .prepare(
                 "SELECT id, project, category, content, created_at FROM context_items \
-                 WHERE (?1 IS NULL OR project = ?1) ORDER BY category, created_at DESC",
+                 WHERE (project IS NULL OR ?1 IS NULL OR project = ?1) ORDER BY category, created_at DESC",
             )
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let context_items: Vec<ContextItemResult> = stmt
@@ -444,7 +444,7 @@ impl MnemosyneServer {
         let mut stmt = conn
             .prepare(
                 "SELECT id, error_message, root_cause, fix_description, tags, file_path, created_at \
-                 FROM bugs WHERE (?1 IS NULL OR project = ?1) ORDER BY created_at DESC LIMIT 20",
+                 FROM bugs WHERE (project IS NULL OR ?1 IS NULL OR project = ?1) ORDER BY created_at DESC LIMIT 20",
             )
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let recent_bugs: Vec<BugResult> = stmt
@@ -467,7 +467,7 @@ impl MnemosyneServer {
         let mut stmt = conn
             .prepare(
                 "SELECT id, rule, reason, file_path, created_at FROM do_not_repeat \
-                 WHERE (?1 IS NULL OR project = ?1) ORDER BY created_at DESC",
+                 WHERE (project IS NULL OR ?1 IS NULL OR project = ?1) ORDER BY created_at DESC",
             )
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let do_not_repeat: Vec<DoNotRepeatResult> = stmt
@@ -654,9 +654,15 @@ impl MnemosyneServer {
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         let id = conn.last_insert_rowid();
+        let scope = match (&input.project, &file_path) {
+            (Some(p), Some(f)) => format!("project={p}, file={f}"),
+            (Some(p), None) => format!("project={p}"),
+            (None, Some(f)) => format!("GLOBAL, file={f}"),
+            (None, None) => "GLOBAL (applies to all projects)".to_string(),
+        };
         Ok(Json(SimpleResult {
             success: true,
-            message: format!("Do-not-repeat rule added (id: {id})"),
+            message: format!("Do-not-repeat rule added (id: {id}, scope: {scope})"),
         }))
     }
 
@@ -680,7 +686,7 @@ impl MnemosyneServer {
         ];
 
         let sql = "SELECT id, rule, reason, file_path, created_at FROM do_not_repeat \
-                   WHERE (?1 = '' OR project = ?1) \
+                   WHERE (project IS NULL OR ?1 = '' OR project = ?1) \
                    AND (?2 = '' OR file_path = ?2 OR file_path IS NULL) \
                    ORDER BY created_at DESC LIMIT 100";
 
@@ -1316,6 +1322,83 @@ mod tests {
             .unwrap();
         // Should return both global (file_path IS NULL) and scoped rules
         assert_eq!(list.results.len(), 2);
+    }
+
+    #[test]
+    fn test_global_rules_visible_with_project_filter() {
+        let server = test_server();
+        // Global rule (no project)
+        server
+            .add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+                rule: "global rule".to_string(),
+                reason: None,
+                project: None,
+                file_path: None,
+            }))
+            .unwrap();
+        // Project-scoped rule
+        server
+            .add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+                rule: "project rule".to_string(),
+                reason: None,
+                project: Some("myproj".to_string()),
+                file_path: None,
+            }))
+            .unwrap();
+
+        // Filtering by project should return both global + project-scoped
+        let Json(list) = server
+            .get_do_not_repeat(Parameters(GetDoNotRepeatInput {
+                project: Some("myproj".to_string()),
+                file_path: None,
+            }))
+            .unwrap();
+        assert_eq!(list.results.len(), 2);
+
+        // project_summary should also include global rules
+        let Json(summary) = server
+            .get_project_summary(Parameters(GetProjectSummaryInput {
+                project: Some("myproj".to_string()),
+            }))
+            .unwrap();
+        assert_eq!(summary.do_not_repeat.len(), 2);
+
+        // Different project should only see global rule
+        let Json(list) = server
+            .get_do_not_repeat(Parameters(GetDoNotRepeatInput {
+                project: Some("other".to_string()),
+                file_path: None,
+            }))
+            .unwrap();
+        assert_eq!(list.results.len(), 1);
+        assert_eq!(list.results[0].rule, "global rule");
+    }
+
+    #[test]
+    fn test_add_do_not_repeat_scope_message() {
+        let server = test_server();
+        // Global
+        let Json(result) = server
+            .add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+                rule: "test".to_string(),
+                reason: None,
+                project: None,
+                file_path: None,
+            }))
+            .unwrap();
+        assert!(result.message.contains("GLOBAL"));
+
+        // Project-scoped
+        let Json(result) = server
+            .add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+                rule: "test".to_string(),
+                reason: None,
+                project: Some("myproj".to_string()),
+                file_path: None,
+            }))
+            .unwrap();
+        assert!(result.message.contains("project=myproj"));
+        assert!(!result.message.contains("GLOBAL"));
     }
 
     #[test]

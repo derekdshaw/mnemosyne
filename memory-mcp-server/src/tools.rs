@@ -103,7 +103,7 @@ pub struct AddDoNotRepeatInput {
     pub rule: String,
     /// Why this should not be repeated
     pub reason: Option<String>,
-    /// Project scope
+    /// Project scope — omit or set null for a GLOBAL rule that applies to all projects. Set to a specific project name to scope the rule to that project only.
     pub project: Option<String>,
     /// File path scope (optional)
     pub file_path: Option<String>,
