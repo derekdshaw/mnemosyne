@@ -113,7 +113,6 @@ This project uses Mnemosyne for persistent session memory. A session briefing
 at startup via the SessionStart hook — no manual tool call needed.
 
 When working:
-- Before exploring unfamiliar code, call `search_sessions` to check if it was discussed before.
 - When you fix a bug, call `log_bug` with the error message, root cause, and fix description.
 - When the user corrects your approach, call `add_do_not_repeat` to remember the lesson.
 - When we make an architectural decision, call `save_context` with category "architecture".
