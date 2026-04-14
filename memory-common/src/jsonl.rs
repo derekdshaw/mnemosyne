@@ -78,13 +78,22 @@ pub fn parse_line(line: &str) -> Result<Option<Record>> {
 
     let mut v: Value = serde_json::from_str(line)?;
 
-    let record_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let record_type = v
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
 
     match record_type.as_str() {
         "user" => parse_user_message(&mut v),
         "assistant" => parse_assistant_message(&mut v),
-        "system" | "permission-mode" | "file-history-snapshot" | "attachment"
-        | "queue-operation" | "custom-title" | "agent-name" => Ok(Some(Record::Skip)),
+        "system"
+        | "permission-mode"
+        | "file-history-snapshot"
+        | "attachment"
+        | "queue-operation"
+        | "custom-title"
+        | "agent-name" => Ok(Some(Record::Skip)),
         _ => Ok(Some(Record::Skip)),
     }
 }
@@ -97,7 +106,10 @@ fn parse_user_message(v: &mut Value) -> Result<Option<Record>> {
     let git_branch = take_opt_str(v, "gitBranch");
     let timestamp = take_opt_str(v, "timestamp");
 
-    let content = v.get_mut("message").and_then(|m| m.get_mut("content")).map(Value::take);
+    let content = v
+        .get_mut("message")
+        .and_then(|m| m.get_mut("content"))
+        .map(Value::take);
 
     match content {
         Some(Value::String(s)) => Ok(Some(Record::UserMessage {
@@ -111,9 +123,9 @@ fn parse_user_message(v: &mut Value) -> Result<Option<Record>> {
         })),
         Some(Value::Array(blocks)) => {
             // Check if this is a tool_result message
-            let has_tool_result = blocks.iter().any(|b| {
-                b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-            });
+            let has_tool_result = blocks
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
 
             if has_tool_result {
                 let results = blocks
@@ -147,7 +159,9 @@ fn parse_user_message(v: &mut Value) -> Result<Option<Record>> {
                     .iter()
                     .filter_map(|b| {
                         if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            b.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                            b.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
                         } else {
                             None
                         }
@@ -176,23 +190,26 @@ fn parse_assistant_message(v: &mut Value) -> Result<Option<Record>> {
     let timestamp = take_opt_str(v, "timestamp");
 
     let mut message = v.get_mut("message");
-    let model = message.as_ref()
+    let model = message
+        .as_ref()
         .and_then(|m| m.get("model"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let content_blocks = message.as_mut()
+    let content_blocks = message
+        .as_mut()
         .and_then(|m| m.get_mut("content"))
         .and_then(|c| c.as_array_mut())
         .map(|blocks| {
             blocks
                 .iter_mut()
-                .filter_map(|b| parse_content_block(b))
+                .filter_map(parse_content_block)
                 .collect()
         })
         .unwrap_or_default();
 
-    let usage = v.get("message")
+    let usage = v
+        .get("message")
         .and_then(|m| m.get("usage"))
         .map(|u| UsageInfo {
             input_tokens: u.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
@@ -257,7 +274,10 @@ fn extract_tool_result_content(b: &Value) -> String {
             .iter()
             .filter_map(|block| {
                 if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                    block
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
@@ -341,10 +361,7 @@ mod tests {
         let record = parse_line(line).unwrap().unwrap();
         match record {
             Record::UserMessage {
-                uuid,
-                content,
-                cwd,
-                ..
+                uuid, content, cwd, ..
             } => {
                 assert_eq!(uuid, "abc");
                 assert_eq!(content, "hello world");
@@ -405,8 +422,7 @@ mod tests {
 
     #[test]
     fn test_extract_file_path() {
-        let input: Value =
-            serde_json::from_str(r#"{"file_path":"/foo/bar.rs"}"#).unwrap();
+        let input: Value = serde_json::from_str(r#"{"file_path":"/foo/bar.rs"}"#).unwrap();
         assert_eq!(
             extract_file_path("Read", &input),
             Some("/foo/bar.rs".to_string())
@@ -423,9 +439,7 @@ mod tests {
         );
         let record = parse_line(&line).unwrap().unwrap();
         match record {
-            Record::AssistantMessage {
-                content_blocks, ..
-            } => match &content_blocks[0] {
+            Record::AssistantMessage { content_blocks, .. } => match &content_blocks[0] {
                 ContentBlock::Thinking(t) => {
                     assert!(t.len() <= 504); // 500 + "..."
                     assert!(t.ends_with("..."));
@@ -472,7 +486,11 @@ mod tests {
         let line = r#"{"type":"assistant","uuid":"nu1","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
         let record = parse_line(line).unwrap().unwrap();
         match record {
-            Record::AssistantMessage { usage, content_blocks, .. } => {
+            Record::AssistantMessage {
+                usage,
+                content_blocks,
+                ..
+            } => {
                 assert!(usage.is_none());
                 assert_eq!(content_blocks.len(), 1);
             }
@@ -482,7 +500,8 @@ mod tests {
 
     #[test]
     fn test_extract_tool_input_summary_bash() {
-        let input: Value = serde_json::from_str(r#"{"command":"cargo build --release 2>&1"}"#).unwrap();
+        let input: Value =
+            serde_json::from_str(r#"{"command":"cargo build --release 2>&1"}"#).unwrap();
         let summary = extract_tool_input_summary("Bash", &input);
         assert_eq!(summary, Some("cargo build --release 2>&1".to_string()));
     }

@@ -72,7 +72,10 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<SearchSessionsInput>,
     ) -> Result<Json<SessionResultList>, rmcp::ErrorData> {
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let limit = clamp_limit(input.limit);
 
         // FTS5's snippet() requires the FTS table to be directly in the FROM clause
@@ -89,7 +92,7 @@ impl MnemosyneServer {
              FROM messages_fts \
              JOIN messages m ON messages_fts.uuid = m.uuid \
              JOIN sessions s ON m.session_id = s.session_id \
-             WHERE messages_fts MATCH ?1"
+             WHERE messages_fts MATCH ?1",
         );
         let mut params: Vec<Param> = vec![Param::Text(escape_fts_query(&input.query))];
 
@@ -102,7 +105,9 @@ impl MnemosyneServer {
         // Over-fetch to account for dedup — we'll trim to limit after
         sql.push_str(&format!(" LIMIT {}", limit * 5));
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let all_rows: Vec<SessionResult> = stmt
             .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(SessionResult {
@@ -136,13 +141,16 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetRecentSessionsInput>,
     ) -> Result<Json<SessionResultList>, rmcp::ErrorData> {
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let days = clamp_days(input.days);
 
         let mut sql = String::from(
             "SELECT session_id, project, start_time, message_count, \
              total_input_tokens, total_output_tokens \
-             FROM sessions WHERE start_time >= datetime('now', ?1)"
+             FROM sessions WHERE start_time >= datetime('now', ?1)",
         );
         let mut params: Vec<Param> = vec![Param::Text(format!("-{days} days"))];
 
@@ -152,7 +160,9 @@ impl MnemosyneServer {
         }
         sql.push_str(" ORDER BY start_time DESC LIMIT 50");
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
             .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(SessionResult {
@@ -178,7 +188,10 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetSessionDetailInput>,
     ) -> Result<Json<SessionDetail>, rmcp::ErrorData> {
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         let session: SessionDetail = conn
             .query_row(
@@ -256,14 +269,20 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetFileHistoryInput>,
     ) -> Result<Json<FileHistoryList>, rmcp::ErrorData> {
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         // Static query with 3 fixed params — empty string means "no filter".
-        let file_path_pattern = input.file_path.as_ref()
+        let file_path_pattern = input
+            .file_path
+            .as_ref()
             .map(|fp| format!("%{fp}%"))
             .unwrap_or_default();
         let project = input.project.clone().unwrap_or_default();
-        let days_param = input.days
+        let days_param = input
+            .days
             .map(|d| format!("-{} days", d.clamp(1, 365)))
             .unwrap_or_default();
         let params = [
@@ -281,7 +300,9 @@ impl MnemosyneServer {
              AND (?3 = '' OR tc.timestamp >= datetime('now', ?3)) \
              ORDER BY tc.timestamp DESC LIMIT 50";
 
-        let mut stmt = conn.prepare(sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
             .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(FileHistoryEntry {
@@ -308,11 +329,17 @@ impl MnemosyneServer {
     ) -> Result<Json<SimpleResult>, rmcp::ErrorData> {
         // S4: Validate and truncate input
         if input.content.is_empty() {
-            return Err(rmcp::ErrorData::invalid_request("content must not be empty", None));
+            return Err(rmcp::ErrorData::invalid_request(
+                "content must not be empty",
+                None,
+            ));
         }
         let content = truncate_utf8(&input.content, 10_000);
 
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         conn.execute(
             "INSERT INTO context_items (project, category, content, created_at) \
              VALUES (?1, ?2, ?3, datetime('now'))",
@@ -339,14 +366,17 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<SearchContextInput>,
     ) -> Result<Json<ContextItemList>, rmcp::ErrorData> {
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let limit = clamp_limit(input.limit);
 
         let mut sql = String::from(
             "SELECT c.id, c.project, c.category, c.content, c.created_at \
              FROM context_fts f \
              JOIN context_items c ON f.item_id = CAST(c.id AS TEXT) \
-             WHERE context_fts MATCH ?1"
+             WHERE context_fts MATCH ?1",
         );
         let mut params: Vec<Param> = vec![Param::Text(escape_fts_query(&input.query))];
 
@@ -360,7 +390,9 @@ impl MnemosyneServer {
         }
         sql.push_str(&format!(" LIMIT {limit}"));
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
             .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(ContextItemResult {
@@ -384,7 +416,10 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetProjectSummaryInput>,
     ) -> Result<Json<ProjectSummary>, rmcp::ErrorData> {
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         // Context items
         let mut stmt = conn
@@ -481,13 +516,22 @@ impl MnemosyneServer {
     ) -> Result<Json<SimpleResult>, rmcp::ErrorData> {
         // S4: Validate and truncate input
         if input.error_message.is_empty() || input.fix_description.is_empty() {
-            return Err(rmcp::ErrorData::invalid_request("error_message and fix_description must not be empty", None));
+            return Err(rmcp::ErrorData::invalid_request(
+                "error_message and fix_description must not be empty",
+                None,
+            ));
         }
         let error_message = truncate_utf8(&input.error_message, 10_000);
         let fix_description = truncate_utf8(&input.fix_description, 10_000);
-        let root_cause = input.root_cause.as_deref().map(|s| truncate_utf8(s, 10_000));
+        let root_cause = input
+            .root_cause
+            .as_deref()
+            .map(|s| truncate_utf8(s, 10_000));
 
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let file_path = input.file_path.as_deref().map(db::normalize_path);
 
         // M4: Use input.project instead of hardcoded NULL
@@ -532,7 +576,10 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<SearchBugsInput>,
     ) -> Result<Json<BugResultList>, rmcp::ErrorData> {
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         let mut sql = String::from(
             "SELECT b.id, b.error_message, b.root_cause, b.fix_description, b.tags, b.file_path, b.created_at \
@@ -555,7 +602,9 @@ impl MnemosyneServer {
         }
         sql.push_str(" ORDER BY b.created_at DESC LIMIT 20");
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
             .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(BugResult {
@@ -583,12 +632,18 @@ impl MnemosyneServer {
     ) -> Result<Json<SimpleResult>, rmcp::ErrorData> {
         // S4: Validate and truncate input
         if input.rule.is_empty() {
-            return Err(rmcp::ErrorData::invalid_request("rule must not be empty", None));
+            return Err(rmcp::ErrorData::invalid_request(
+                "rule must not be empty",
+                None,
+            ));
         }
         let rule = truncate_utf8(&input.rule, 10_000);
         let reason = input.reason.as_deref().map(|s| truncate_utf8(s, 10_000));
 
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let file_path = input.file_path.as_deref().map(db::normalize_path);
 
         // No FTS table for do_not_repeat — rules are few per project and retrieved
@@ -613,7 +668,10 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetDoNotRepeatInput>,
     ) -> Result<Json<DoNotRepeatList>, rmcp::ErrorData> {
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         // Static query with nullable params — NULL means "no filter".
         // file_path filter also includes rules with NULL file_path (global rules).
@@ -628,7 +686,9 @@ impl MnemosyneServer {
                    AND (?2 = '' OR file_path = ?2 OR file_path IS NULL) \
                    ORDER BY created_at DESC LIMIT 100";
 
-        let mut stmt = conn.prepare(sql).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let results = stmt
             .query_map(rusqlite::params_from_iter(&params), |row| {
                 Ok(DoNotRepeatResult {
@@ -652,7 +712,10 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetTokenStatsInput>,
     ) -> Result<Json<TokenStatsReport>, rmcp::ErrorData> {
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let days = clamp_days(input.days.or(Some(30)));
         let project = input.project.clone().unwrap_or_default();
         let params = [
@@ -677,37 +740,49 @@ impl MnemosyneServer {
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let avg_input = if total_sessions > 0 { total_input / total_sessions } else { 0 };
-        let avg_output = if total_sessions > 0 { total_output / total_sessions } else { 0 };
+        let avg_input = if total_sessions > 0 {
+            total_input / total_sessions
+        } else {
+            0
+        };
+        let avg_output = if total_sessions > 0 {
+            total_output / total_sessions
+        } else {
+            0
+        };
 
         // Files with anatomy
-        let files_with_anatomy: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM file_anatomy WHERE (?1 = '' OR project = ?1)",
-            [&Param::Text(project.clone())],
-            |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let files_with_anatomy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_anatomy WHERE (?1 = '' OR project = ?1)",
+                [&Param::Text(project.clone())],
+                |row| row.get(0),
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         // Total file reads and repeated reads
-        let total_file_reads: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM session_reads",
-            [],
-            |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let total_file_reads: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_reads", [], |row| row.get(0))
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let repeated_reads: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM (SELECT session_id, file_path FROM session_reads \
+        let repeated_reads: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM (SELECT session_id, file_path FROM session_reads \
              GROUP BY session_id, file_path HAVING COUNT(*) > 1)",
-            [],
-            |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         // Estimated saveable tokens: sum of token_estimate for non-first reads per (session, file)
-        let saveable: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(token_estimate), 0) FROM session_reads \
+        let saveable: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(token_estimate), 0) FROM session_reads \
              WHERE id NOT IN (SELECT MIN(id) FROM session_reads GROUP BY session_id, file_path)",
-            [],
-            |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         // Top 5 sessions by total tokens
         let mut stmt = conn.prepare(
@@ -752,7 +827,10 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetAnalyticsInput>,
     ) -> Result<Json<AnalyticsReport>, rmcp::ErrorData> {
-        let conn = self.db.lock().map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let days = clamp_days(input.days.or(Some(30)));
         let project = input.project.clone().unwrap_or_default();
         let params = [
@@ -768,37 +846,50 @@ impl MnemosyneServer {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let cache_read: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(tu.cache_read_tokens), 0) \
+        let cache_read: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(tu.cache_read_tokens), 0) \
              FROM token_usage tu JOIN sessions s ON tu.session_id = s.session_id \
              WHERE s.start_time >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2)",
-            rusqlite::params_from_iter(&params),
-            |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                rusqlite::params_from_iter(&params),
+                |row| row.get(0),
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         // --- Productivity ---
-        let mut stmt = conn.prepare(
-            "SELECT tc.tool_name, COUNT(*) as cnt FROM tool_calls tc \
+        let mut stmt = conn
+            .prepare(
+                "SELECT tc.tool_name, COUNT(*) as cnt FROM tool_calls tc \
              JOIN sessions s ON tc.session_id = s.session_id \
              WHERE s.start_time >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2) \
-             GROUP BY tc.tool_name ORDER BY cnt DESC"
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+             GROUP BY tc.tool_name ORDER BY cnt DESC",
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let tool_call_breakdown: Vec<ToolBreakdownEntry> = stmt
             .query_map(rusqlite::params_from_iter(&params), |row| {
-                Ok(ToolBreakdownEntry { tool_name: row.get(0)?, count: row.get(1)? })
+                Ok(ToolBreakdownEntry {
+                    tool_name: row.get(0)?,
+                    count: row.get(1)?,
+                })
             })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
             .filter_map(|r| r.ok())
             .collect();
 
         // Top read files
-        let mut stmt = conn.prepare(
-            "SELECT file_path, times_read, estimated_tokens FROM file_anatomy \
-             WHERE (?1 = '' OR project = ?1) ORDER BY times_read DESC LIMIT 10"
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT file_path, times_read, estimated_tokens FROM file_anatomy \
+             WHERE (?1 = '' OR project = ?1) ORDER BY times_read DESC LIMIT 10",
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let top_read_files: Vec<FileStatsEntry> = stmt
             .query_map([&Param::Text(project.clone())], |row| {
-                Ok(FileStatsEntry { file_path: row.get(0)?, count: row.get(1)?, estimated_tokens: row.get(2)? })
+                Ok(FileStatsEntry {
+                    file_path: row.get(0)?,
+                    count: row.get(1)?,
+                    estimated_tokens: row.get(2)?,
+                })
             })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
             .filter_map(|r| r.ok())
@@ -811,7 +902,11 @@ impl MnemosyneServer {
         ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let top_written_files: Vec<FileStatsEntry> = stmt
             .query_map([&Param::Text(project.clone())], |row| {
-                Ok(FileStatsEntry { file_path: row.get(0)?, count: row.get(1)?, estimated_tokens: row.get(2)? })
+                Ok(FileStatsEntry {
+                    file_path: row.get(0)?,
+                    count: row.get(1)?,
+                    estimated_tokens: row.get(2)?,
+                })
             })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
             .filter_map(|r| r.ok())
@@ -825,77 +920,101 @@ impl MnemosyneServer {
         ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         // Bugs by file (top 5)
-        let mut stmt = conn.prepare(
-            "SELECT file_path, COUNT(*) as cnt FROM bugs \
+        let mut stmt = conn
+            .prepare(
+                "SELECT file_path, COUNT(*) as cnt FROM bugs \
              WHERE file_path IS NOT NULL AND (?1 = '' OR project = ?1) \
-             GROUP BY file_path ORDER BY cnt DESC LIMIT 5"
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+             GROUP BY file_path ORDER BY cnt DESC LIMIT 5",
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let bugs_by_file: Vec<FileBugCount> = stmt
             .query_map([&Param::Text(project.clone())], |row| {
-                Ok(FileBugCount { file_path: row.get(0)?, bug_count: row.get(1)? })
+                Ok(FileBugCount {
+                    file_path: row.get(0)?,
+                    bug_count: row.get(1)?,
+                })
             })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
             .filter_map(|r| r.ok())
             .collect();
 
         // --- Savings ---
-        let files_with_anatomy: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM file_anatomy WHERE (?1 = '' OR project = ?1)",
-            [&Param::Text(project.clone())],
-            |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let files_with_anatomy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_anatomy WHERE (?1 = '' OR project = ?1)",
+                [&Param::Text(project.clone())],
+                |row| row.get(0),
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let total_file_reads: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM session_reads", [], |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let total_file_reads: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_reads", [], |row| row.get(0))
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let repeated_reads: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM (SELECT session_id, file_path FROM session_reads \
+        let repeated_reads: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM (SELECT session_id, file_path FROM session_reads \
              GROUP BY session_id, file_path HAVING COUNT(*) > 1)",
-            [], |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let saveable: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(token_estimate), 0) FROM session_reads \
+        let saveable: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(token_estimate), 0) FROM session_reads \
              WHERE id NOT IN (SELECT MIN(id) FROM session_reads GROUP BY session_id, file_path)",
-            [], |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         // --- Memory Health ---
-        let mut stmt = conn.prepare(
-            "SELECT category, COUNT(*) FROM context_items \
-             WHERE (?1 = '' OR project = ?1) GROUP BY category ORDER BY COUNT(*) DESC"
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT category, COUNT(*) FROM context_items \
+             WHERE (?1 = '' OR project = ?1) GROUP BY category ORDER BY COUNT(*) DESC",
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let context_items_by_category: Vec<CategoryCount> = stmt
             .query_map([&Param::Text(project.clone())], |row| {
-                Ok(CategoryCount { category: row.get(0)?, count: row.get(1)? })
+                Ok(CategoryCount {
+                    category: row.get(0)?,
+                    count: row.get(1)?,
+                })
             })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
             .filter_map(|r| r.ok())
             .collect();
 
-        let total_dnr: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM do_not_repeat WHERE (?1 = '' OR project = ?1)",
-            [&Param::Text(project.clone())],
-            |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let total_dnr: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM do_not_repeat WHERE (?1 = '' OR project = ?1)",
+                [&Param::Text(project.clone())],
+                |row| row.get(0),
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let total_bugs: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM bugs WHERE (?1 = '' OR project = ?1)",
-            [&Param::Text(project.clone())],
-            |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let total_bugs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM bugs WHERE (?1 = '' OR project = ?1)",
+                [&Param::Text(project.clone())],
+                |row| row.get(0),
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let oldest_context: Option<String> = conn.query_row(
-            "SELECT MIN(created_at) FROM context_items WHERE (?1 = '' OR project = ?1)",
-            [&Param::Text(project.clone())],
-            |row| row.get(0),
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let oldest_context: Option<String> = conn
+            .query_row(
+                "SELECT MIN(created_at) FROM context_items WHERE (?1 = '' OR project = ?1)",
+                [&Param::Text(project.clone())],
+                |row| row.get(0),
+            )
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         // Projects with context vs without
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT project FROM context_items WHERE project IS NOT NULL"
-        ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT project FROM context_items WHERE project IS NOT NULL")
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         let projects_with: Vec<String> = stmt
             .query_map([], |row| row.get(0))
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
@@ -944,8 +1063,11 @@ impl ServerHandler for MnemosyneServer {
         let mut info = ServerInfo::default();
         info.server_info.name = "mnemosyne".into();
         info.server_info.version = "0.1.0".into();
-        info.instructions = Some("Mnemosyne: Claude Code session memory system. Search past sessions, \
-            save context, log bugs, and manage do-not-repeat rules.".into());
+        info.instructions = Some(
+            "Mnemosyne: Claude Code session memory system. Search past sessions, \
+            save context, log bugs, and manage do-not-repeat rules."
+                .into(),
+        );
         info
     }
 }
@@ -1086,9 +1208,11 @@ mod tests {
 
         // Verify stored content is truncated
         let conn = server.db.lock().unwrap();
-        let stored: String = conn.query_row(
-            "SELECT content FROM context_items LIMIT 1", [], |r| r.get(0),
-        ).unwrap();
+        let stored: String = conn
+            .query_row("SELECT content FROM context_items LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert!(stored.len() <= 10_004); // 10000 + "..."
         assert!(stored.ends_with("..."));
     }
@@ -1119,14 +1243,16 @@ mod tests {
     #[test]
     fn test_log_bug_with_tags_filter() {
         let server = test_server();
-        server.log_bug(Parameters(LogBugInput {
-            error_message: "perf regression".to_string(),
-            fix_description: "use arena".to_string(),
-            root_cause: None,
-            tags: Some("perf,memory".to_string()),
-            file_path: None,
-            project: None,
-        })).unwrap();
+        server
+            .log_bug(Parameters(LogBugInput {
+                error_message: "perf regression".to_string(),
+                fix_description: "use arena".to_string(),
+                root_cause: None,
+                tags: Some("perf,memory".to_string()),
+                file_path: None,
+                project: None,
+            }))
+            .unwrap();
 
         let result = server.search_bugs(Parameters(SearchBugsInput {
             query: "regression".to_string(),
@@ -1143,7 +1269,10 @@ mod tests {
         let result = server.log_bug(Parameters(LogBugInput {
             error_message: "".to_string(),
             fix_description: "some fix".to_string(),
-            root_cause: None, tags: None, file_path: None, project: None,
+            root_cause: None,
+            tags: None,
+            file_path: None,
+            project: None,
         }));
         assert!(result.is_err());
     }
@@ -1151,17 +1280,21 @@ mod tests {
     #[test]
     fn test_add_and_get_do_not_repeat() {
         let server = test_server();
-        server.add_do_not_repeat(Parameters(AddDoNotRepeatInput {
-            rule: "Don't use individual Vec<u8>".to_string(),
-            reason: Some("causes drop-time regression".to_string()),
-            project: Some("test_proj".to_string()),
-            file_path: None,
-        })).unwrap();
+        server
+            .add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+                rule: "Don't use individual Vec<u8>".to_string(),
+                reason: Some("causes drop-time regression".to_string()),
+                project: Some("test_proj".to_string()),
+                file_path: None,
+            }))
+            .unwrap();
 
-        let Json(list) = server.get_do_not_repeat(Parameters(GetDoNotRepeatInput {
-            project: Some("test_proj".to_string()),
-            file_path: None,
-        })).unwrap();
+        let Json(list) = server
+            .get_do_not_repeat(Parameters(GetDoNotRepeatInput {
+                project: Some("test_proj".to_string()),
+                file_path: None,
+            }))
+            .unwrap();
         assert_eq!(list.results.len(), 1);
         assert!(list.results[0].rule.contains("Vec<u8>"));
     }
@@ -1170,24 +1303,30 @@ mod tests {
     fn test_get_do_not_repeat_file_filter() {
         let server = test_server();
         // Global rule (no file_path)
-        server.add_do_not_repeat(Parameters(AddDoNotRepeatInput {
-            rule: "global rule".to_string(),
-            reason: None,
-            project: Some("proj".to_string()),
-            file_path: None,
-        })).unwrap();
+        server
+            .add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+                rule: "global rule".to_string(),
+                reason: None,
+                project: Some("proj".to_string()),
+                file_path: None,
+            }))
+            .unwrap();
         // Scoped rule
-        server.add_do_not_repeat(Parameters(AddDoNotRepeatInput {
-            rule: "scoped rule".to_string(),
-            reason: None,
-            project: Some("proj".to_string()),
-            file_path: Some("src/main.rs".to_string()),
-        })).unwrap();
+        server
+            .add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+                rule: "scoped rule".to_string(),
+                reason: None,
+                project: Some("proj".to_string()),
+                file_path: Some("src/main.rs".to_string()),
+            }))
+            .unwrap();
 
-        let Json(list) = server.get_do_not_repeat(Parameters(GetDoNotRepeatInput {
-            project: Some("proj".to_string()),
-            file_path: Some("src/main.rs".to_string()),
-        })).unwrap();
+        let Json(list) = server
+            .get_do_not_repeat(Parameters(GetDoNotRepeatInput {
+                project: Some("proj".to_string()),
+                file_path: Some("src/main.rs".to_string()),
+            }))
+            .unwrap();
         // Should return both global (file_path IS NULL) and scoped rules
         assert_eq!(list.results.len(), 2);
     }
@@ -1195,9 +1334,11 @@ mod tests {
     #[test]
     fn test_get_project_summary_empty() {
         let server = test_server();
-        let Json(summary) = server.get_project_summary(Parameters(GetProjectSummaryInput {
-            project: Some("nonexistent".to_string()),
-        })).unwrap();
+        let Json(summary) = server
+            .get_project_summary(Parameters(GetProjectSummaryInput {
+                project: Some("nonexistent".to_string()),
+            }))
+            .unwrap();
         assert!(summary.context_items.is_empty());
         assert!(summary.recent_bugs.is_empty());
         assert!(summary.do_not_repeat.is_empty());
@@ -1207,27 +1348,37 @@ mod tests {
     #[test]
     fn test_get_project_summary_with_data() {
         let server = test_server();
-        server.save_context(Parameters(SaveContextInput {
-            content: "test context".to_string(),
-            category: "arch".to_string(),
-            project: Some("proj".to_string()),
-        })).unwrap();
-        server.log_bug(Parameters(LogBugInput {
-            error_message: "test bug".to_string(),
-            fix_description: "test fix".to_string(),
-            root_cause: None, tags: None, file_path: None,
-            project: Some("proj".to_string()),
-        })).unwrap();
-        server.add_do_not_repeat(Parameters(AddDoNotRepeatInput {
-            rule: "test rule".to_string(),
-            reason: None,
-            project: Some("proj".to_string()),
-            file_path: None,
-        })).unwrap();
+        server
+            .save_context(Parameters(SaveContextInput {
+                content: "test context".to_string(),
+                category: "arch".to_string(),
+                project: Some("proj".to_string()),
+            }))
+            .unwrap();
+        server
+            .log_bug(Parameters(LogBugInput {
+                error_message: "test bug".to_string(),
+                fix_description: "test fix".to_string(),
+                root_cause: None,
+                tags: None,
+                file_path: None,
+                project: Some("proj".to_string()),
+            }))
+            .unwrap();
+        server
+            .add_do_not_repeat(Parameters(AddDoNotRepeatInput {
+                rule: "test rule".to_string(),
+                reason: None,
+                project: Some("proj".to_string()),
+                file_path: None,
+            }))
+            .unwrap();
 
-        let Json(summary) = server.get_project_summary(Parameters(GetProjectSummaryInput {
-            project: Some("proj".to_string()),
-        })).unwrap();
+        let Json(summary) = server
+            .get_project_summary(Parameters(GetProjectSummaryInput {
+                project: Some("proj".to_string()),
+            }))
+            .unwrap();
         assert_eq!(summary.context_items.len(), 1);
         assert_eq!(summary.recent_bugs.len(), 1);
         assert_eq!(summary.do_not_repeat.len(), 1);
@@ -1241,10 +1392,12 @@ mod tests {
             conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) VALUES ('s1', 'proj', datetime('now', '-1 hour'), 10, 100, 200)", []).unwrap();
             conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) VALUES ('s2', 'proj', datetime('now'), 5, 50, 100)", []).unwrap();
         }
-        let Json(list) = server.get_recent_sessions(Parameters(GetRecentSessionsInput {
-            days: Some(1),
-            project: None,
-        })).unwrap();
+        let Json(list) = server
+            .get_recent_sessions(Parameters(GetRecentSessionsInput {
+                days: Some(1),
+                project: None,
+            }))
+            .unwrap();
         assert_eq!(list.results.len(), 2);
         // Most recent first
         assert_eq!(list.results[0].session_id, "s2");
@@ -1261,9 +1414,11 @@ mod tests {
             conn.execute("INSERT INTO tool_calls (message_uuid, session_id, tool_name, timestamp) VALUES ('m2', 'sd1', 'Read', '2026-01-01T01:00:00Z')", []).unwrap();
             conn.execute("INSERT INTO tool_calls (message_uuid, session_id, tool_name, timestamp) VALUES ('m2', 'sd1', 'Read', '2026-01-01T01:01:00Z')", []).unwrap();
         }
-        let Json(detail) = server.get_session_detail(Parameters(GetSessionDetailInput {
-            session_id: "sd1".to_string(),
-        })).unwrap();
+        let Json(detail) = server
+            .get_session_detail(Parameters(GetSessionDetailInput {
+                session_id: "sd1".to_string(),
+            }))
+            .unwrap();
         assert_eq!(detail.session_id, "sd1");
         assert_eq!(detail.first_user_message, Some("first message".to_string()));
         assert_eq!(detail.last_user_message, Some("last message".to_string()));
@@ -1281,11 +1436,13 @@ mod tests {
             conn.execute("INSERT INTO messages (uuid, session_id, role, content_type, content) VALUES ('fm1', 'fts1', 'user', 'text', 'the arena allocator prevents drop-time regression')", []).unwrap();
             conn.execute("INSERT INTO messages_fts (uuid, session_id, content) VALUES ('fm1', 'fts1', 'the arena allocator prevents drop-time regression')", []).unwrap();
         }
-        let Json(list) = server.search_sessions(Parameters(SearchSessionsInput {
-            query: "regression".to_string(),
-            limit: None,
-            project: None,
-        })).unwrap();
+        let Json(list) = server
+            .search_sessions(Parameters(SearchSessionsInput {
+                query: "regression".to_string(),
+                limit: None,
+                project: None,
+            }))
+            .unwrap();
         assert_eq!(list.results.len(), 1);
         assert_eq!(list.results[0].session_id, "fts1");
     }
@@ -1299,11 +1456,13 @@ mod tests {
             conn.execute("INSERT INTO messages (uuid, session_id, role, content_type) VALUES ('fhm1', 'fh1', 'assistant', 'tool_use')", []).unwrap();
             conn.execute("INSERT INTO tool_calls (message_uuid, session_id, tool_name, file_path, timestamp) VALUES ('fhm1', 'fh1', 'Edit', 'src/parser/pack.rs', datetime('now'))", []).unwrap();
         }
-        let Json(list) = server.get_file_history(Parameters(GetFileHistoryInput {
-            file_path: Some("pack.rs".to_string()),
-            project: None,
-            days: None,
-        })).unwrap();
+        let Json(list) = server
+            .get_file_history(Parameters(GetFileHistoryInput {
+                file_path: Some("pack.rs".to_string()),
+                project: None,
+                days: None,
+            }))
+            .unwrap();
         assert_eq!(list.results.len(), 1);
         assert_eq!(list.results[0].tool_name, "Edit");
     }
@@ -1313,10 +1472,12 @@ mod tests {
     #[test]
     fn test_get_token_stats_empty() {
         let server = test_server();
-        let Json(report) = server.get_token_stats(Parameters(GetTokenStatsInput {
-            project: None,
-            days: Some(30),
-        })).unwrap();
+        let Json(report) = server
+            .get_token_stats(Parameters(GetTokenStatsInput {
+                project: None,
+                days: Some(30),
+            }))
+            .unwrap();
         assert_eq!(report.total_sessions, 0);
         assert_eq!(report.total_input_tokens, 0);
         assert_eq!(report.total_output_tokens, 0);
@@ -1330,8 +1491,12 @@ mod tests {
             let conn = server.db.lock().unwrap();
             conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) \
                 VALUES ('ts1', 'proj', datetime('now'), 10, 5000, 3000)", []).unwrap();
-            conn.execute("INSERT INTO messages (uuid, session_id, role, content_type, content) \
-                VALUES ('tu1', 'ts1', 'assistant', 'text', 'response')", []).unwrap();
+            conn.execute(
+                "INSERT INTO messages (uuid, session_id, role, content_type, content) \
+                VALUES ('tu1', 'ts1', 'assistant', 'text', 'response')",
+                [],
+            )
+            .unwrap();
             conn.execute("INSERT INTO token_usage (message_uuid, session_id, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) \
                 VALUES ('tu1', 'ts1', 5000, 3000, 1000, 500)", []).unwrap();
             conn.execute("INSERT INTO file_anatomy (project, file_path, description, estimated_tokens, times_read, times_written, last_scanned) \
@@ -1340,10 +1505,12 @@ mod tests {
             conn.execute("INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) VALUES ('ts1', 'src/main.rs', datetime('now', '-2 minutes'), 200)", []).unwrap();
             conn.execute("INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) VALUES ('ts1', 'src/main.rs', datetime('now'), 200)", []).unwrap();
         }
-        let Json(report) = server.get_token_stats(Parameters(GetTokenStatsInput {
-            project: Some("proj".to_string()),
-            days: Some(7),
-        })).unwrap();
+        let Json(report) = server
+            .get_token_stats(Parameters(GetTokenStatsInput {
+                project: Some("proj".to_string()),
+                days: Some(7),
+            }))
+            .unwrap();
         assert_eq!(report.total_sessions, 1);
         assert_eq!(report.total_input_tokens, 5000);
         assert_eq!(report.total_output_tokens, 3000);
@@ -1360,10 +1527,12 @@ mod tests {
     #[test]
     fn test_get_analytics_empty() {
         let server = test_server();
-        let Json(report) = server.get_analytics(Parameters(GetAnalyticsInput {
-            project: None,
-            days: Some(30),
-        })).unwrap();
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: None,
+                days: Some(30),
+            }))
+            .unwrap();
         assert_eq!(report.total_sessions, 0);
         assert!(report.tool_call_breakdown.is_empty());
         assert!(report.top_read_files.is_empty());
@@ -1379,8 +1548,12 @@ mod tests {
             // Session + messages
             conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) \
                 VALUES ('a1', 'proj', datetime('now'), 5, 2000, 1000)", []).unwrap();
-            conn.execute("INSERT INTO messages (uuid, session_id, role, content_type, content) \
-                VALUES ('m1', 'a1', 'assistant', 'tool_use', 'reading file')", []).unwrap();
+            conn.execute(
+                "INSERT INTO messages (uuid, session_id, role, content_type, content) \
+                VALUES ('m1', 'a1', 'assistant', 'tool_use', 'reading file')",
+                [],
+            )
+            .unwrap();
             // Tool calls
             conn.execute("INSERT INTO tool_calls (message_uuid, session_id, tool_name, file_path, timestamp) \
                 VALUES ('m1', 'a1', 'Read', 'src/lib.rs', datetime('now'))", []).unwrap();
@@ -1395,21 +1568,35 @@ mod tests {
             conn.execute("INSERT INTO bugs (project, error_message, fix_description, file_path, created_at) \
                 VALUES ('proj', 'null ref', 'add check', 'src/main.rs', datetime('now'))", []).unwrap();
             // Context
-            conn.execute("INSERT INTO context_items (project, category, content, created_at) \
-                VALUES ('proj', 'architecture', 'uses arena allocators', datetime('now'))", []).unwrap();
-            conn.execute("INSERT INTO context_items (project, category, content, created_at) \
-                VALUES ('proj', 'conventions', 'snake_case everywhere', datetime('now'))", []).unwrap();
+            conn.execute(
+                "INSERT INTO context_items (project, category, content, created_at) \
+                VALUES ('proj', 'architecture', 'uses arena allocators', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO context_items (project, category, content, created_at) \
+                VALUES ('proj', 'conventions', 'snake_case everywhere', datetime('now'))",
+                [],
+            )
+            .unwrap();
             // Do-not-repeat
-            conn.execute("INSERT INTO do_not_repeat (project, rule, created_at) \
-                VALUES ('proj', 'no Vec<u8> for delta', datetime('now'))", []).unwrap();
+            conn.execute(
+                "INSERT INTO do_not_repeat (project, rule, created_at) \
+                VALUES ('proj', 'no Vec<u8> for delta', datetime('now'))",
+                [],
+            )
+            .unwrap();
             // Another project with sessions but no context
             conn.execute("INSERT INTO sessions (session_id, project, start_time, message_count, total_input_tokens, total_output_tokens) \
                 VALUES ('a2', 'orphan', datetime('now'), 1, 100, 50)", []).unwrap();
         }
-        let Json(report) = server.get_analytics(Parameters(GetAnalyticsInput {
-            project: None,
-            days: Some(30),
-        })).unwrap();
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: None,
+                days: Some(30),
+            }))
+            .unwrap();
         assert_eq!(report.total_sessions, 2);
         assert!(!report.tool_call_breakdown.is_empty());
         assert_eq!(report.tool_call_breakdown[0].tool_name, "Read");
@@ -1421,6 +1608,8 @@ mod tests {
         assert_eq!(report.total_bugs_logged, 1);
         assert!(report.oldest_context_item.is_some());
         assert!(report.projects_with_context.contains(&"proj".to_string()));
-        assert!(report.projects_without_context.contains(&"orphan".to_string()));
+        assert!(report
+            .projects_without_context
+            .contains(&"orphan".to_string()));
     }
 }

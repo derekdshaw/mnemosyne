@@ -197,6 +197,4 @@ pub const FTS_MIGRATIONS: &[(&str, &str)] = &[
 ];
 
 /// Index migrations that use multi-statement strings.
-pub const INDEX_MIGRATIONS: &[&str] = &[
-    CREATE_TOOL_CALLS_INDEXES,
-];
+pub const INDEX_MIGRATIONS: &[&str] = &[CREATE_TOOL_CALLS_INDEXES];

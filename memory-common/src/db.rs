@@ -26,7 +26,10 @@ pub fn open_db() -> Result<Connection> {
         let meta = std::fs::symlink_metadata(parent)
             .with_context(|| format!("failed to read metadata: {}", parent.display()))?;
         if meta.file_type().is_symlink() {
-            anyhow::bail!("database parent directory is a symlink: {}", parent.display());
+            anyhow::bail!(
+                "database parent directory is a symlink: {}",
+                parent.display()
+            );
         }
     }
     let conn = Connection::open(&path)
@@ -89,8 +92,9 @@ fn run_migrations_unconditionally(conn: &Connection) -> Result<()> {
 
     for sql in schema::INDEX_MIGRATIONS {
         for stmt in sql.split(';').filter(|s| !s.trim().is_empty()) {
-            conn.execute_batch(stmt)
-                .with_context(|| format!("index migration failed: {}", &stmt[..stmt.len().min(80)]))?;
+            conn.execute_batch(stmt).with_context(|| {
+                format!("index migration failed: {}", &stmt[..stmt.len().min(80)])
+            })?;
         }
     }
 
@@ -181,8 +185,14 @@ mod tests {
 
     #[test]
     fn test_normalize_path() {
-        assert_eq!(normalize_path(r"D:\r\git_dag_analyzer"), "D:/r/git_dag_analyzer");
-        assert_eq!(normalize_path("D:/r/git_dag_analyzer"), "D:/r/git_dag_analyzer");
+        assert_eq!(
+            normalize_path(r"D:\r\git_dag_analyzer"),
+            "D:/r/git_dag_analyzer"
+        );
+        assert_eq!(
+            normalize_path("D:/r/git_dag_analyzer"),
+            "D:/r/git_dag_analyzer"
+        );
     }
 
     #[test]
@@ -194,8 +204,8 @@ mod tests {
     #[test]
     fn test_truncate_utf8_multibyte() {
         // Each emoji is 4 bytes. "🎉🎊" = 8 bytes
-        let s = "🎉🎊🎈";  // 12 bytes
-        // Truncating at 5 should land inside the second emoji, back up to byte 4
+        let s = "🎉🎊🎈"; // 12 bytes
+                          // Truncating at 5 should land inside the second emoji, back up to byte 4
         assert_eq!(truncate_utf8(s, 5), "🎉...");
         // Truncating at 8 should include two emojis
         assert_eq!(truncate_utf8(s, 8), "🎉🎊...");
@@ -208,7 +218,7 @@ mod tests {
         // CJK chars are 3 bytes each
         let s = "你好世界"; // 12 bytes
         assert_eq!(truncate_utf8(s, 6), "你好...");
-        assert_eq!(truncate_utf8(s, 7), "你好...");  // lands inside 世, backs up to 6
+        assert_eq!(truncate_utf8(s, 7), "你好..."); // lands inside 世, backs up to 6
     }
 
     #[test]
@@ -226,7 +236,9 @@ mod tests {
     fn test_schema_version_skip() {
         let conn = open_db_in_memory().expect("create DB");
         // user_version should be set after first migration
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert!(version >= 1, "user_version should be set after migration");
         // Second call should be a no-op (skip all DDL)
         run_migrations(&conn).expect("second run should skip and succeed");
@@ -234,7 +246,10 @@ mod tests {
 
     #[test]
     fn test_project_from_cwd() {
-        assert_eq!(project_from_cwd(r"D:\r\git_dag_analyzer"), "git_dag_analyzer");
+        assert_eq!(
+            project_from_cwd(r"D:\r\git_dag_analyzer"),
+            "git_dag_analyzer"
+        );
         assert_eq!(project_from_cwd("D:/r/mnemosyne/"), "mnemosyne");
         assert_eq!(project_from_cwd("/home/user/projects/foo"), "foo");
     }

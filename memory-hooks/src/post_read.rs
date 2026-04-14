@@ -73,7 +73,9 @@ mod tests {
             cwd: Some("/home/user/myproject".into()),
             tool_name: Some("Read".into()),
             tool_input: Some(json!({"file_path": "/home/user/myproject/src/main.rs"})),
-            tool_response: Some(json!({"content": "//! Main entry point\npub fn main() {\n    println!(\"hello\");\n}\n"})),
+            tool_response: Some(
+                json!({"content": "//! Main entry point\npub fn main() {\n    println!(\"hello\");\n}\n"}),
+            ),
         }
     }
 
@@ -82,10 +84,13 @@ mod tests {
         let conn = memory_common::db::open_db_in_memory().unwrap();
         run(&conn, &make_input()).unwrap();
 
-        let count: i64 = conn.query_row(
-            "SELECT count(*) FROM session_reads WHERE session_id = 'test-session'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM session_reads WHERE session_id = 'test-session'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -94,12 +99,18 @@ mod tests {
         let conn = memory_common::db::open_db_in_memory().unwrap();
         run(&conn, &make_input()).unwrap();
 
-        let description: String = conn.query_row(
-            "SELECT description FROM file_anatomy WHERE project = 'myproject'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let description: String = conn
+            .query_row(
+                "SELECT description FROM file_anatomy WHERE project = 'myproject'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         // Should contain extracted content, not just "File: main.rs"
-        assert!(description.contains("Main entry point"), "got: {description}");
+        assert!(
+            description.contains("Main entry point"),
+            "got: {description}"
+        );
         assert!(description.contains("pub fn main"), "got: {description}");
     }
 
@@ -118,11 +129,17 @@ mod tests {
         };
         run(&conn, &input2).unwrap();
 
-        let (desc, times_read): (String, i64) = conn.query_row(
-            "SELECT description, times_read FROM file_anatomy WHERE project = 'myproject'",
-            [], |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+        let (desc, times_read): (String, i64) = conn
+            .query_row(
+                "SELECT description, times_read FROM file_anatomy WHERE project = 'myproject'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(times_read, 2);
-        assert!(desc.contains("Updated module"), "description should reflect latest content, got: {desc}");
+        assert!(
+            desc.contains("Updated module"),
+            "description should reflect latest content, got: {desc}"
+        );
     }
 }

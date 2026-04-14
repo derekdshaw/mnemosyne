@@ -17,11 +17,7 @@ pub fn extract_description(content: &str, file_path: &str) -> String {
         return "Empty file".to_string();
     }
 
-    let ext = file_path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
 
     let raw = match ext.as_str() {
         "rs" => extract_rust(content),
@@ -75,7 +71,7 @@ fn extract_rust(content: &str) -> String {
         {
             // Extract just the name (up to first '(' or '{' or '<' or ':')
             let sig = trimmed
-                .splitn(2, |c: char| c == '(' || c == '{' || c == '<' || c == ':')
+                .split(['(', '{', '<', ':'])
                 .next()
                 .unwrap_or(trimmed)
                 .trim();
@@ -114,7 +110,7 @@ fn extract_python(content: &str) -> String {
         let trimmed = line.trim();
         if trimmed.starts_with("def ") || trimmed.starts_with("class ") {
             let name = trimmed
-                .splitn(2, |c: char| c == '(' || c == ':')
+                .split(['(', ':'])
                 .next()
                 .unwrap_or(trimmed)
                 .trim();
@@ -159,7 +155,7 @@ fn extract_js_ts(content: &str) -> String {
             || trimmed.starts_with("export default ")
         {
             let name = trimmed
-                .splitn(2, |c: char| c == '(' || c == '{' || c == '<' || c == '=' || c == ':')
+                .split(['(', '{', '<', '=', ':'])
                 .next()
                 .unwrap_or(trimmed)
                 .trim();
@@ -213,15 +209,18 @@ fn extract_java(content: &str) -> String {
             || trimmed.starts_with("public abstract class ")
         {
             let name = trimmed
-                .splitn(2, |c: char| c == '{' || c == '<')
+                .split(['{', '<'])
                 .next()
                 .unwrap_or(trimmed)
                 .trim();
             declarations.push(name.to_string());
-        } else if trimmed.starts_with("public ") && trimmed.contains('(') && !trimmed.contains("class ") {
+        } else if trimmed.starts_with("public ")
+            && trimmed.contains('(')
+            && !trimmed.contains("class ")
+        {
             // Public method signature
             let sig = trimmed
-                .splitn(2, '{')
+                .split('{')
                 .next()
                 .unwrap_or(trimmed)
                 .trim()
@@ -242,13 +241,11 @@ fn extract_go(content: &str) -> String {
 
     // Package-level doc comment: // lines immediately before `package`
     let mut doc_lines: Vec<&str> = Vec::new();
-    let mut found_package = false;
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("// ") && !found_package {
+        if trimmed.starts_with("// ") {
             doc_lines.push(trimmed.trim_start_matches("//").trim());
         } else if trimmed.starts_with("package ") {
-            found_package = true;
             let pkg = trimmed.trim();
             parts.push(pkg.to_string());
             break;
@@ -267,38 +264,33 @@ fn extract_go(content: &str) -> String {
     let mut exports: Vec<String> = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("func ") {
+        if let Some(after_func) = trimmed.strip_prefix("func ") {
             // func FuncName( or func (receiver) FuncName(
-            let after_func = &trimmed[5..];
             let name = if after_func.starts_with('(') {
                 // Method with receiver: func (r *Recv) Name(
                 after_func
                     .find(')')
                     .and_then(|i| {
                         let rest = after_func[i + 1..].trim();
-                        rest.split(|c: char| c == '(' || c == ' ').next()
+                        rest.split(['(', ' ']).next()
                     })
                     .unwrap_or("")
             } else {
                 after_func
-                    .split(|c: char| c == '(' || c == ' ' || c == '[')
+                    .split(['(', ' ', '['])
                     .next()
                     .unwrap_or("")
             };
             if !name.is_empty() && name.starts_with(|c: char| c.is_uppercase()) {
                 exports.push(format!("func {name}"));
             }
-        } else if trimmed.starts_with("type ") {
-            let after_type = &trimmed[5..];
+        } else if let Some(after_type) = trimmed.strip_prefix("type ") {
             let name = after_type
-                .split(|c: char| c == ' ' || c == '[')
+                .split([' ', '['])
                 .next()
                 .unwrap_or("");
             if !name.is_empty() && name.starts_with(|c: char| c.is_uppercase()) {
-                let kind = after_type
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("type");
+                let kind = after_type.split_whitespace().nth(1).unwrap_or("type");
                 exports.push(format!("type {name} {kind}"));
             }
         }
@@ -363,9 +355,9 @@ fn extract_json(content: &str) -> String {
     let mut keys: Vec<String> = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with('"') {
-            if let Some(end) = trimmed[1..].find('"') {
-                let key = &trimmed[1..1 + end];
+        if let Some(stripped) = trimmed.strip_prefix('"') {
+            if let Some(end) = stripped.find('"') {
+                let key = &stripped[..end];
                 if !keys.contains(&key.to_string()) && keys.len() < 10 {
                     keys.push(key.to_string());
                 }
@@ -457,7 +449,8 @@ mod tests {
 
     #[test]
     fn test_extract_markdown_heading() {
-        let content = "# Architecture\n\nThis document describes the system architecture.\n\n## Components\n";
+        let content =
+            "# Architecture\n\nThis document describes the system architecture.\n\n## Components\n";
         let desc = extract_description(content, "ARCHITECTURE.md");
         assert!(desc.contains("Architecture"));
         assert!(desc.contains("system architecture"));
@@ -478,7 +471,8 @@ mod tests {
 
     #[test]
     fn test_extract_toml() {
-        let content = "# Workspace configuration\n[workspace]\nmembers = [\"a\", \"b\"]\n\n[dependencies]\n";
+        let content =
+            "# Workspace configuration\n[workspace]\nmembers = [\"a\", \"b\"]\n\n[dependencies]\n";
         let desc = extract_description(content, "Cargo.toml");
         assert!(desc.contains("Workspace configuration"));
         assert!(desc.contains("[workspace]"));
@@ -505,7 +499,10 @@ public class AuthService {
         assert!(desc.contains("public class AuthService"), "got: {desc}");
         assert!(desc.contains("public void login"), "got: {desc}");
         assert!(desc.contains("public boolean validate"), "got: {desc}");
-        assert!(!desc.contains("internal"), "should not contain private methods: {desc}");
+        assert!(
+            !desc.contains("internal"),
+            "should not contain private methods: {desc}"
+        );
     }
 
     #[test]
@@ -555,7 +552,10 @@ func helperFunc() {}
         assert!(desc.contains("func NewServer"), "got: {desc}");
         assert!(desc.contains("func Start"), "got: {desc}");
         assert!(desc.contains("type Server struct"), "got: {desc}");
-        assert!(!desc.contains("helperFunc"), "should not contain unexported func: {desc}");
+        assert!(
+            !desc.contains("helperFunc"),
+            "should not contain unexported func: {desc}"
+        );
     }
 
     #[test]
@@ -576,6 +576,9 @@ type internal struct{}
         let desc = extract_description(content, "models.go");
         assert!(desc.contains("type User struct"), "got: {desc}");
         assert!(desc.contains("type Role interface"), "got: {desc}");
-        assert!(!desc.contains("internal"), "should not contain unexported type: {desc}");
+        assert!(
+            !desc.contains("internal"),
+            "should not contain unexported type: {desc}"
+        );
     }
 }

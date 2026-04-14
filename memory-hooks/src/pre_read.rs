@@ -27,7 +27,9 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
 
         if let Some((description, tokens)) = anatomy {
             let filename = file_path.rsplit('/').next().unwrap_or(&file_path);
-            let token_info = tokens.map(|t| format!(" (~{t} tokens)")).unwrap_or_default();
+            let token_info = tokens
+                .map(|t| format!(" (~{t} tokens)"))
+                .unwrap_or_default();
             eprintln!("\u{1f4c4} {filename}: {description}{token_info}");
         }
     }
@@ -44,9 +46,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
         .ok();
 
     if let Some((read_at, tokens)) = last_read {
-        let token_info = tokens
-            .map(|t| format!(" ({t} tokens)"))
-            .unwrap_or_default();
+        let token_info = tokens.map(|t| format!(" ({t} tokens)")).unwrap_or_default();
         eprintln!(
             "\u{26a0}\u{fe0f} Already read at {read_at}{token_info}. Consider if re-read is needed."
         );
@@ -88,7 +88,8 @@ mod tests {
             "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
              VALUES ('test-session', 'D:/r/myproject/src/main.rs', datetime('now'), 500)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         // Should return Ok (stderr warning emitted but we just verify no error)
         assert!(run(&conn, &input).is_ok());
     }

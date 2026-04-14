@@ -16,7 +16,10 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 #[derive(Parser)]
-#[command(name = "session-ingester", about = "Ingest Claude Code JSONL transcripts into Mnemosyne SQLite")]
+#[command(
+    name = "session-ingester",
+    about = "Ingest Claude Code JSONL transcripts into Mnemosyne SQLite"
+)]
 struct Cli {
     /// Path to the .claude directory
     #[arg(long, default_value_t = default_claude_dir())]
@@ -76,7 +79,10 @@ fn run() -> Result<()> {
     let projects_dir = PathBuf::from(&cli.claude_dir).join("projects");
     if !projects_dir.exists() {
         if cli.verbose {
-            eprintln!("mnemosyne: no projects directory found at {}", projects_dir.display());
+            eprintln!(
+                "mnemosyne: no projects directory found at {}",
+                projects_dir.display()
+            );
         }
         return Ok(());
     }
@@ -100,10 +106,10 @@ fn run() -> Result<()> {
             }
 
             // If --session-id is set, only ingest that specific file
-            let force = cli.session_id.as_ref().map_or(false, |sid| {
+            let force = cli.session_id.as_ref().is_some_and(|sid| {
                 path.file_stem()
                     .and_then(|s| s.to_str())
-                    .map_or(false, |stem| stem == sid)
+                    .is_some_and(|stem| stem == sid)
             });
             if cli.session_id.is_some() && !force {
                 continue;
@@ -124,11 +130,7 @@ fn run() -> Result<()> {
                     total_files += 1;
                     total_messages += messages;
                     if cli.verbose {
-                        tracing::info!(
-                            "ingested {} messages from {}",
-                            messages,
-                            path.display()
-                        );
+                        tracing::info!("ingested {} messages from {}", messages, path.display());
                     }
                 }
                 Err(e) => {
@@ -139,9 +141,7 @@ fn run() -> Result<()> {
     }
 
     if total_files > 0 || cli.verbose {
-        eprintln!(
-            "mnemosyne: ingested {total_messages} messages from {total_files} transcript(s)"
-        );
+        eprintln!("mnemosyne: ingested {total_messages} messages from {total_files} transcript(s)");
     }
 
     Ok(())
@@ -153,7 +153,12 @@ enum IngestResult {
     Ingested { messages: usize },
 }
 
-fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) -> Result<IngestResult> {
+fn ingest_file(
+    conn: &Connection,
+    path: &PathBuf,
+    verbose: bool,
+    force: bool,
+) -> Result<IngestResult> {
     let metadata = fs::metadata(path)?;
     let file_size = metadata.len() as i64;
     let file_mtime = metadata
@@ -226,7 +231,10 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
         // S11: Skip absurdly long lines to prevent OOM
         if line.len() > 10_000_000 {
             if verbose {
-                tracing::warn!("line {line_count}: skipped ({} bytes exceeds 10MB limit)", line.len());
+                tracing::warn!(
+                    "line {line_count}: skipped ({} bytes exceeds 10MB limit)",
+                    line.len()
+                );
             }
             continue;
         }
@@ -281,10 +289,12 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
                 )?.execute(rusqlite::params![uuid, session_id, parent_uuid, content, timestamp])?;
 
                 // C1: FTS5 dedup
-                tx.prepare_cached("DELETE FROM messages_fts WHERE uuid = ?1")?.execute([&uuid])?;
+                tx.prepare_cached("DELETE FROM messages_fts WHERE uuid = ?1")?
+                    .execute([&uuid])?;
                 tx.prepare_cached(
                     "INSERT INTO messages_fts (uuid, session_id, content) VALUES (?1, ?2, ?3)",
-                )?.execute(rusqlite::params![uuid, session_id, content])?;
+                )?
+                .execute(rusqlite::params![uuid, session_id, content])?;
 
                 message_count += 1;
             }
@@ -380,18 +390,19 @@ fn ingest_file(conn: &Connection, path: &PathBuf, verbose: bool, force: bool) ->
 
                 // C1: FTS5 dedup — delete before insert
                 if let Some(ref text) = content_text {
-                    tx.prepare_cached("DELETE FROM messages_fts WHERE uuid = ?1")?.execute([&uuid])?;
+                    tx.prepare_cached("DELETE FROM messages_fts WHERE uuid = ?1")?
+                        .execute([&uuid])?;
                     tx.prepare_cached(
                         "INSERT INTO messages_fts (uuid, session_id, content) VALUES (?1, ?2, ?3)",
-                    )?.execute(rusqlite::params![uuid, session_id, text])?;
+                    )?
+                    .execute(rusqlite::params![uuid, session_id, text])?;
                 }
 
                 // Insert tool calls
                 for (tool_name, _tool_id, tool_input) in &tool_uses {
-                    let file_path = jsonl::extract_file_path(tool_name, tool_input)
-                        .map(|p| normalize_path(&p));
-                    let input_summary =
-                        jsonl::extract_tool_input_summary(tool_name, tool_input);
+                    let file_path =
+                        jsonl::extract_file_path(tool_name, tool_input).map(|p| normalize_path(&p));
+                    let input_summary = jsonl::extract_tool_input_summary(tool_name, tool_input);
 
                     tx.prepare_cached(
                         "INSERT INTO tool_calls (message_uuid, session_id, tool_name, tool_input_summary, file_path, timestamp) \
@@ -513,9 +524,13 @@ mod tests {
         let result = ingest_file(&conn, &path, false, true).unwrap();
         assert!(matches!(result, IngestResult::Ingested { messages: 1 }));
 
-        let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 1);
-        let fts_count: i64 = conn.query_row("SELECT count(*) FROM messages_fts", [], |r| r.get(0)).unwrap();
+        let fts_count: i64 = conn
+            .query_row("SELECT count(*) FROM messages_fts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(fts_count, 1);
     }
 
@@ -526,9 +541,13 @@ mod tests {
         let path = f.path().to_path_buf();
         ingest_file(&conn, &path, false, true).unwrap();
 
-        let tool_count: i64 = conn.query_row("SELECT count(*) FROM tool_calls", [], |r| r.get(0)).unwrap();
+        let tool_count: i64 = conn
+            .query_row("SELECT count(*) FROM tool_calls", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(tool_count, 1);
-        let tool_name: String = conn.query_row("SELECT tool_name FROM tool_calls LIMIT 1", [], |r| r.get(0)).unwrap();
+        let tool_name: String = conn
+            .query_row("SELECT tool_name FROM tool_calls LIMIT 1", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(tool_name, "Read");
     }
 
@@ -539,10 +558,13 @@ mod tests {
         let path = f.path().to_path_buf();
         ingest_file(&conn, &path, false, true).unwrap();
 
-        let (input_tok, output_tok): (i64, i64) = conn.query_row(
-            "SELECT input_tokens, output_tokens FROM token_usage LIMIT 1",
-            [], |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+        let (input_tok, output_tok): (i64, i64) = conn
+            .query_row(
+                "SELECT input_tokens, output_tokens FROM token_usage LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(input_tok, 100);
         assert_eq!(output_tok, 50);
     }
@@ -559,7 +581,9 @@ mod tests {
         assert!(matches!(result, IngestResult::Skipped));
 
         // Message count should still be 1
-        let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 1);
     }
 
