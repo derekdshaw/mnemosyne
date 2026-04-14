@@ -15,11 +15,13 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
     let session_id = input.session_id.as_deref().unwrap_or("");
     let project = input.project();
 
-    // Get file content from tool response (available in PostToolUse hooks)
+    // Get file content from tool response (available in PostToolUse hooks).
+    // Claude Code nests the content at tool_response.file.content
     let content_str = input
         .tool_response
         .as_ref()
-        .and_then(|r| r.get("content"))
+        .and_then(|r| r.get("file"))
+        .and_then(|f| f.get("content"))
         .and_then(|c| c.as_str());
 
     // Estimate tokens from response content
@@ -73,9 +75,16 @@ mod tests {
             cwd: Some("/home/user/myproject".into()),
             tool_name: Some("Read".into()),
             tool_input: Some(json!({"file_path": "/home/user/myproject/src/main.rs"})),
-            tool_response: Some(
-                json!({"content": "//! Main entry point\npub fn main() {\n    println!(\"hello\");\n}\n"}),
-            ),
+            tool_response: Some(json!({
+                "type": "text",
+                "file": {
+                    "filePath": "/home/user/myproject/src/main.rs",
+                    "content": "//! Main entry point\npub fn main() {\n    println!(\"hello\");\n}\n",
+                    "numLines": 4,
+                    "startLine": 1,
+                    "totalLines": 4
+                }
+            })),
         }
     }
 
@@ -92,6 +101,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+
+        // Verify token estimate is populated
+        let token_est: Option<i64> = conn
+            .query_row(
+                "SELECT token_estimate FROM session_reads WHERE session_id = 'test-session'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(token_est.is_some(), "token_estimate should be populated");
+        assert!(token_est.unwrap() > 0, "token_estimate should be > 0");
     }
 
     #[test]
@@ -125,7 +145,16 @@ mod tests {
             cwd: Some("/home/user/myproject".into()),
             tool_name: Some("Read".into()),
             tool_input: Some(json!({"file_path": "/home/user/myproject/src/main.rs"})),
-            tool_response: Some(json!({"content": "//! Updated module\npub struct Config {}\n"})),
+            tool_response: Some(json!({
+                "type": "text",
+                "file": {
+                    "filePath": "/home/user/myproject/src/main.rs",
+                    "content": "//! Updated module\npub struct Config {}\n",
+                    "numLines": 2,
+                    "startLine": 1,
+                    "totalLines": 2
+                }
+            })),
         };
         run(&conn, &input2).unwrap();
 
