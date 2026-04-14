@@ -200,12 +200,7 @@ fn parse_assistant_message(v: &mut Value) -> Result<Option<Record>> {
         .as_mut()
         .and_then(|m| m.get_mut("content"))
         .and_then(|c| c.as_array_mut())
-        .map(|blocks| {
-            blocks
-                .iter_mut()
-                .filter_map(parse_content_block)
-                .collect()
-        })
+        .map(|blocks| blocks.iter_mut().filter_map(parse_content_block).collect())
         .unwrap_or_default();
 
     let usage = v

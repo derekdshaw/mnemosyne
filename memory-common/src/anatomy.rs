@@ -109,11 +109,7 @@ fn extract_python(content: &str) -> String {
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("def ") || trimmed.starts_with("class ") {
-            let name = trimmed
-                .split(['(', ':'])
-                .next()
-                .unwrap_or(trimmed)
-                .trim();
+            let name = trimmed.split(['(', ':']).next().unwrap_or(trimmed).trim();
             names.push(name.to_string());
         }
     }
@@ -208,11 +204,7 @@ fn extract_java(content: &str) -> String {
             || trimmed.starts_with("public record ")
             || trimmed.starts_with("public abstract class ")
         {
-            let name = trimmed
-                .split(['{', '<'])
-                .next()
-                .unwrap_or(trimmed)
-                .trim();
+            let name = trimmed.split(['{', '<']).next().unwrap_or(trimmed).trim();
             declarations.push(name.to_string());
         } else if trimmed.starts_with("public ")
             && trimmed.contains('(')
@@ -276,19 +268,13 @@ fn extract_go(content: &str) -> String {
                     })
                     .unwrap_or("")
             } else {
-                after_func
-                    .split(['(', ' ', '['])
-                    .next()
-                    .unwrap_or("")
+                after_func.split(['(', ' ', '[']).next().unwrap_or("")
             };
             if !name.is_empty() && name.starts_with(|c: char| c.is_uppercase()) {
                 exports.push(format!("func {name}"));
             }
         } else if let Some(after_type) = trimmed.strip_prefix("type ") {
-            let name = after_type
-                .split([' ', '['])
-                .next()
-                .unwrap_or("");
+            let name = after_type.split([' ', '[']).next().unwrap_or("");
             if !name.is_empty() && name.starts_with(|c: char| c.is_uppercase()) {
                 let kind = after_type.split_whitespace().nth(1).unwrap_or("type");
                 exports.push(format!("type {name} {kind}"));
