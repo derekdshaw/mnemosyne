@@ -77,14 +77,14 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Get previous version from last commit
+      - name: Get latest existing tag
         id: previous
         if: steps.tag_exists.outputs.exists == 'false'
         run: |
-          PREV=$(git show HEAD~1:Cargo.toml | sed -n '/\[workspace\.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}')
-          echo "version=v$PREV" >> $GITHUB_OUTPUT
+          PREV=$(git tag --sort=-v:refname | head -n1 || echo "")
+          echo "version=$PREV" >> $GITHUB_OUTPUT
 
-      - name: Create tag if version changed
+      - name: Create tag if version is newer than latest tag
         id: create_tag
         if: |
           steps.tag_exists.outputs.exists == 'false' &&
