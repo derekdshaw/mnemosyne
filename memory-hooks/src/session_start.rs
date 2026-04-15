@@ -7,6 +7,15 @@ use rusqlite::Connection;
 
 use crate::HookInput;
 
+type Rule = (String, Option<String>, Option<String>, Option<String>);
+type Bug = (
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
 pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
     let project = input.project();
 
@@ -20,7 +29,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
          WHERE (project IS NULL OR ?1 IS NULL OR project = ?1) \
          ORDER BY project IS NOT NULL, created_at DESC",
     )?;
-    let rules: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+    let rules: Vec<Rule> = stmt
         .query_map(rusqlite::params![project_ref], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -55,7 +64,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
          WHERE (project IS NULL OR ?1 IS NULL OR project = ?1) \
          ORDER BY created_at DESC LIMIT 10",
     )?;
-    let bugs: Vec<(String, Option<String>, String, Option<String>, Option<String>)> = stmt
+    let bugs: Vec<Bug> = stmt
         .query_map(rusqlite::params![project_ref], |row| {
             Ok((
                 row.get::<_, String>(0)?,
