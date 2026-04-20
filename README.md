@@ -4,6 +4,10 @@ A session memory system for Claude Code. Named after the Greek goddess of memory
 
 Mnemosyne gives Claude Code persistent, queryable memory across sessions by ingesting existing JSONL transcripts into SQLite and exposing them through MCP tools and real-time hooks.
 
+## Inspiration, Kudos, and Credit
+
+I had been thinking of writing something like this but reading an article about [OpenWolf](https://github.com/cytostack/openwolf) pushed me off the fence. Recently my token usage has been getting expensive. So this tool is inspired by and in some ways a port of OpenWolf. If you have not already, head over to the GitHub repo and give it a thumbs up. Additionally I also ran into the excellent [Caveman](https://github.com/juliusbrussee/caveman), which has inspired me to add compression to the Mnemosyne flow. Caveman is compatible with Mnemosyne. If you want to double down on token savings, install Caveman as well. I ended up integrating the compression prompt into save_context rather then calling out to the anthropic api or shelling out to `claude`. This removes overhead and makes the path simpler.
+
 ## What It Does
 
 - **Ingests session transcripts** — Parses Claude Code's JSONL transcript files into a structured SQLite database with full-text search
@@ -113,9 +117,9 @@ This project uses Mnemosyne for persistent session memory. A session briefing
 at startup via the SessionStart hook — no manual tool call needed.
 
 When working:
-- When you fix a bug, call `log_bug` with the error message, root cause, and fix description.
+- When you fix a bug, call `log_bug` with the error message, root cause, and fix description. Set `compress: true` for prose-heavy descriptions.
 - When the user corrects your approach, call `add_do_not_repeat` to remember the lesson.
-- When we make an architectural decision, call `save_context` with category "architecture".
+- When we make an architectural decision, call `save_context` with category "architecture" and `compress: true`. Write content in caveman format: remove articles, use fragments, cut filler words, but preserve code/URLs/paths exactly.
 - After investigating a file's history, call `get_file_history` to see past changes and context.
 ```
 
@@ -124,7 +128,7 @@ See the [Usage Guide](docs/USAGE.md) for a comprehensive CLAUDE.md example and d
 ## Run Tests
 
 ```bash
-cargo test          # 76 tests across all 4 crates
+cargo test          # 91 tests across all 4 crates
 ```
 
 ## Documentation

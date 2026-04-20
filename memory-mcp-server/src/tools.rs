@@ -45,12 +45,21 @@ pub struct GetFileHistoryInput {
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
 pub struct SaveContextInput {
-    /// The context content to save
+    /// The context content to save. When compress is true, write in caveman
+    /// format: remove articles (a/the), use fragments not full sentences,
+    /// cut filler/hedging words (just, really, basically, in order to),
+    /// merge redundant points. MUST preserve: code blocks, inline code,
+    /// URLs, file paths, commands, headings, tables, numeric values exactly.
     pub content: String,
     /// Category: architecture, performance, conventions, etc.
     pub category: String,
     /// Project name (derived from cwd if not provided)
     pub project: Option<String>,
+    /// Set true when content was written in compressed caveman format.
+    /// Use caveman compression for prose-heavy content (architecture notes,
+    /// conventions, decisions). Skip for content that must be exact
+    /// (error messages, configs, code snippets).
+    pub compress: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
@@ -73,11 +82,11 @@ pub struct GetProjectSummaryInput {
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
 pub struct LogBugInput {
-    /// The error message
+    /// The error message — preserve exactly, do not compress
     pub error_message: String,
-    /// How the bug was fixed
+    /// How the bug was fixed. When compress is true, write in caveman format.
     pub fix_description: String,
-    /// Root cause analysis
+    /// Root cause analysis. When compress is true, write in caveman format.
     pub root_cause: Option<String>,
     /// Comma-separated tags
     pub tags: Option<String>,
@@ -85,6 +94,9 @@ pub struct LogBugInput {
     pub file_path: Option<String>,
     /// Project name
     pub project: Option<String>,
+    /// Set true when fix_description/root_cause were written in compressed
+    /// caveman format. Error messages should never be compressed.
+    pub compress: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]

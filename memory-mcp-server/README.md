@@ -37,10 +37,10 @@ tools.rs
 
 | Tool | Input | Description |
 |------|-------|-------------|
-| `save_context` | content, category, project? | Save a knowledge item (architecture, conventions, etc.) |
+| `save_context` | content, category, project?, compress? | Save a knowledge item (architecture, conventions, etc.). Set compress=true and write content in caveman format for token savings. |
 | `search_context` | query, category?, project?, limit? | FTS5 search on saved context |
 | `get_project_summary` | project? | All context + bugs + do-not-repeat + token stats |
-| `log_bug` | error_message, fix_description, root_cause?, tags?, file_path?, project? | Record a bug fix |
+| `log_bug` | error_message, fix_description, root_cause?, tags?, file_path?, project?, compress? | Record a bug fix. Set compress=true and write fix_description/root_cause in caveman format. |
 | `search_bugs` | query, tags?, project? | FTS5 search on bug records |
 | `add_do_not_repeat` | rule, reason?, project?, file_path? | Add a do-not-repeat rule |
 | `get_do_not_repeat` | project?, file_path? | List active do-not-repeat rules |
@@ -76,7 +76,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 ## Test
 
 ```bash
-cargo test -p memory-mcp-server   # 22 tests covering all 13 tools + helper functions
+cargo test -p memory-mcp-server   # 24 tests covering all 13 tools + helper functions
 ```
 
 ## Configuration

@@ -38,9 +38,9 @@ This project uses Mnemosyne for persistent session memory. A session briefing
 at startup via the SessionStart hook — no manual tool call needed.
 
 When working:
-- When you fix a bug, call `log_bug` with the error message, root cause, and fix description.
+- When you fix a bug, call `log_bug` with the error message, root cause, and fix description. Set `compress: true` for prose-heavy descriptions.
 - When the user corrects your approach, call `add_do_not_repeat` to remember the lesson.
-- When we make an architectural decision, call `save_context` with category "architecture".
+- When we make an architectural decision, call `save_context` with category "architecture" and `compress: true`. Write content in caveman format: remove articles, use fragments, cut filler words, but preserve code/URLs/paths exactly.
 - After investigating a file's history, call `get_file_history` to see past changes and context.
 ```
 
@@ -67,12 +67,14 @@ before starting any work. If the briefing mentions relevant prior sessions, call
 - **When the user corrects you**: Call `add_do_not_repeat` immediately. Include the
   reason — it helps judge edge cases later. Scope to a file_path when the rule only
   applies to specific code.
-- **Architecture decisions**: Call `save_context` with category "architecture" whenever
-  we choose a library, design pattern, or structural approach. Include the reasoning.
-- **Performance decisions**: Call `save_context` with category "performance" for any
-  optimization choice, benchmark result, or performance-related constraint.
-- **Conventions**: Call `save_context` with category "conventions" for coding style
-  decisions, naming patterns, or workflow preferences the user expresses.
+- **Architecture decisions**: Call `save_context` with category "architecture" and
+  `compress: true` whenever we choose a library, design pattern, or structural approach.
+  Write in caveman format: remove articles (a/the), use fragments not full sentences,
+  cut filler words, but preserve code blocks, URLs, paths, and headings exactly.
+- **Performance decisions**: Call `save_context` with category "performance" and
+  `compress: true` for any optimization choice, benchmark result, or performance constraint.
+- **Conventions**: Call `save_context` with category "conventions" and `compress: true`
+  for coding style decisions, naming patterns, or workflow preferences the user expresses.
 
 ### File History
 When the user asks about changes to a file or why something is the way it is,
@@ -122,11 +124,10 @@ Claude: calls search_sessions("tree diffing optimization")
 
 ```
 Claude: calls save_context({
-  content: "Chose rmcp crate over hand-rolled JSON-RPC for MCP server. 
-            rmcp handles protocol negotiation, tool registration, and 
-            stdio transport. The crate is young but sufficient for our needs.",
+  content: "Chose rmcp crate over hand-rolled JSON-RPC for MCP server. rmcp handles protocol negotiation, tool registration, stdio transport. Crate young but sufficient.",
   category: "architecture",
-  project: "mnemosyne"
+  project: "mnemosyne",
+  compress: true
 })
 ```
 
@@ -135,12 +136,12 @@ Claude: calls save_context({
 ```
 Claude: calls log_bug({
   error_message: "snippet() fails with 'unable to use function in requested context'",
-  fix_description: "Remove GROUP BY from FTS query. snippet() requires active 
-                    MATCH context which GROUP BY breaks. Dedup by session_id in Rust instead.",
-  root_cause: "FTS5 auxiliary functions lose their match context when GROUP BY is applied",
+  fix_description: "Remove GROUP BY from FTS query. snippet() requires active MATCH context which GROUP BY breaks. Dedup by session_id in Rust instead.",
+  root_cause: "FTS5 auxiliary functions lose match context when GROUP BY applied",
   tags: "sqlite,fts5",
   file_path: "memory-mcp-server/src/main.rs",
-  project: "mnemosyne"
+  project: "mnemosyne",
+  compress: true
 })
 ```
 

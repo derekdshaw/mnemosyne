@@ -4,6 +4,7 @@
 //! extraction, data models, and schema definitions used by all Mnemosyne binaries.
 
 pub mod anatomy;
+pub mod compress;
 pub mod db;
 pub mod jsonl;
 pub mod models;

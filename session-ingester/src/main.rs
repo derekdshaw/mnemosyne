@@ -38,6 +38,12 @@ struct Cli {
     /// Claude Code pipes hook input JSON to stdin containing session_id.
     #[arg(long)]
     from_stdin: bool,
+
+    /// Compress existing uncompressed data using caveman compression.
+    /// Runs `claude --print` to batch-compress context items, messages,
+    /// and bug descriptions. Idempotent — skips already-compressed rows.
+    #[arg(long)]
+    compress_existing: bool,
 }
 
 fn default_claude_dir() -> String {
@@ -75,6 +81,10 @@ fn run() -> Result<()> {
     }
 
     let conn = db::open_db().context("failed to open database")?;
+
+    if cli.compress_existing {
+        return compress_existing(&conn, cli.verbose);
+    }
 
     let projects_dir = PathBuf::from(&cli.claude_dir).join("projects");
     if !projects_dir.exists() {
@@ -492,6 +502,203 @@ struct SessionMeta {
     project: Option<String>,
     first_timestamp: Option<String>,
     last_timestamp: Option<String>,
+}
+
+/// Compress existing uncompressed data using batched `claude --print` calls.
+fn compress_existing(conn: &Connection, verbose: bool) -> Result<()> {
+    use memory_common::compress::{compress_batch, BATCH_SIZE};
+
+    let mut total_compressed = 0usize;
+    let mut total_saved_bytes = 0i64;
+
+    // --- Context items ---
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, content FROM context_items \
+             WHERE original_length IS NULL AND length(content) >= 500",
+        )?;
+        let rows: Vec<(i64, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if !rows.is_empty() {
+            eprintln!("Compressing {} context items...", rows.len());
+            for chunk in rows.chunks(BATCH_SIZE) {
+                let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
+                let results = compress_batch(&texts);
+
+                for (i, cr) in results.iter().enumerate() {
+                    let id = chunk[i].0;
+                    let saved = cr.original_length as i64 - cr.text.len() as i64;
+
+                    conn.execute(
+                        "UPDATE context_items SET content = ?1, original_length = ?2 WHERE id = ?3",
+                        rusqlite::params![cr.text, cr.original_length as i64, id],
+                    )?;
+
+                    // Update FTS
+                    conn.execute(
+                        "DELETE FROM context_fts WHERE item_id = ?1",
+                        [id.to_string()],
+                    )?;
+                    let (project, category): (Option<String>, String) = conn.query_row(
+                        "SELECT project, category FROM context_items WHERE id = ?1",
+                        [id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    conn.execute(
+                        "INSERT INTO context_fts (item_id, project, category, content) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![id.to_string(), project, category, cr.text],
+                    )?;
+
+                    if cr.was_compressed {
+                        total_compressed += 1;
+                        total_saved_bytes += saved;
+                        if verbose {
+                            eprintln!(
+                                "  context_items[{id}]: {} -> {} bytes (saved {saved})",
+                                cr.original_length,
+                                cr.text.len()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Messages ---
+    {
+        let mut stmt = conn.prepare(
+            "SELECT uuid, content FROM messages \
+             WHERE original_length IS NULL AND content IS NOT NULL \
+             AND content_type = 'text' AND length(content) >= 500",
+        )?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if !rows.is_empty() {
+            eprintln!("Compressing {} messages...", rows.len());
+            for chunk in rows.chunks(BATCH_SIZE) {
+                let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
+                let results = compress_batch(&texts);
+
+                for (i, cr) in results.iter().enumerate() {
+                    let uuid = &chunk[i].0;
+                    let saved = cr.original_length as i64 - cr.text.len() as i64;
+
+                    conn.execute(
+                        "UPDATE messages SET content = ?1, original_length = ?2 WHERE uuid = ?3",
+                        rusqlite::params![cr.text, cr.original_length as i64, uuid],
+                    )?;
+
+                    // Update FTS
+                    conn.execute("DELETE FROM messages_fts WHERE uuid = ?1", [uuid])?;
+                    let session_id: String = conn.query_row(
+                        "SELECT session_id FROM messages WHERE uuid = ?1",
+                        [uuid],
+                        |row| row.get(0),
+                    )?;
+                    conn.execute(
+                        "INSERT INTO messages_fts (uuid, session_id, content) \
+                         VALUES (?1, ?2, ?3)",
+                        rusqlite::params![uuid, session_id, cr.text],
+                    )?;
+
+                    if cr.was_compressed {
+                        total_compressed += 1;
+                        total_saved_bytes += saved;
+                        if verbose {
+                            eprintln!(
+                                "  messages[{uuid}]: {} -> {} bytes (saved {saved})",
+                                cr.original_length,
+                                cr.text.len()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Bugs ---
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, fix_description, root_cause FROM bugs \
+             WHERE original_length IS NULL \
+             AND (length(fix_description) >= 500 OR length(COALESCE(root_cause, '')) >= 500)",
+        )?;
+        let rows: Vec<(i64, String, Option<String>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if !rows.is_empty() {
+            eprintln!("Compressing {} bug entries...", rows.len());
+            for (id, fix_desc, root_cause) in &rows {
+                // Compress fix_description and root_cause separately
+                let texts: Vec<&str> = std::iter::once(fix_desc.as_str())
+                    .chain(root_cause.iter().map(|s| s.as_str()))
+                    .collect();
+                let results = compress_batch(&texts);
+
+                let compressed_fix = &results[0];
+                let compressed_root = results.get(1);
+                let original_len = fix_desc.len() + root_cause.as_ref().map_or(0, |s| s.len());
+                let compressed_root_text = compressed_root
+                    .map(|cr| cr.text.clone())
+                    .or(root_cause.clone());
+
+                conn.execute(
+                    "UPDATE bugs SET fix_description = ?1, root_cause = ?2, original_length = ?3 WHERE id = ?4",
+                    rusqlite::params![
+                        compressed_fix.text,
+                        compressed_root_text,
+                        original_len as i64,
+                        id,
+                    ],
+                )?;
+
+                // Update FTS
+                conn.execute("DELETE FROM bugs_fts WHERE bug_id = ?1", [id.to_string()])?;
+                let (project, file_path, error_message): (Option<String>, Option<String>, String) =
+                    conn.query_row(
+                        "SELECT project, file_path, error_message FROM bugs WHERE id = ?1",
+                        [id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?;
+                conn.execute(
+                    "INSERT INTO bugs_fts (bug_id, project, file_path, error_message, root_cause, fix_description) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        id.to_string(),
+                        project,
+                        file_path,
+                        error_message,
+                        compressed_root_text,
+                        compressed_fix.text,
+                    ],
+                )?;
+
+                if compressed_fix.was_compressed {
+                    total_compressed += 1;
+                    let saved = original_len as i64
+                        - compressed_fix.text.len() as i64
+                        - compressed_root_text.as_ref().map_or(0, |s| s.len() as i64);
+                    total_saved_bytes += saved;
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "Compression complete: {total_compressed} items compressed, {total_saved_bytes} bytes saved"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

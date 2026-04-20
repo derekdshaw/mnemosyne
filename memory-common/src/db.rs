@@ -66,7 +66,7 @@ fn setup_pragmas(conn: &Connection) -> Result<()> {
 }
 
 /// Current schema version. Bump this whenever schema changes.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Runs schema migrations only if the database is behind the current version.
 /// Uses PRAGMA user_version to skip all migration work when schema is current.
@@ -80,6 +80,21 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
     Ok(())
+}
+
+/// Add a column to a table, ignoring "duplicate column" errors for idempotency.
+fn add_column_if_not_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    col_type: &str,
+) -> Result<()> {
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {col_type}");
+    match conn.execute_batch(&sql) {
+        Ok(()) => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column") => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Runs all migration statements regardless of version. Used on first setup
@@ -109,6 +124,11 @@ fn run_migrations_unconditionally(conn: &Connection) -> Result<()> {
                 .with_context(|| format!("FTS migration failed for {table_name}"))?;
         }
     }
+
+    // V2: Add original_length column for caveman compression tracking
+    add_column_if_not_exists(conn, "context_items", "original_length", "INTEGER")?;
+    add_column_if_not_exists(conn, "messages", "original_length", "INTEGER")?;
+    add_column_if_not_exists(conn, "bugs", "original_length", "INTEGER")?;
 
     Ok(())
 }

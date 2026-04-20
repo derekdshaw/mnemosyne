@@ -17,11 +17,12 @@ This crate is the foundation layer. It owns:
 
 ```
 lib.rs
-├── anatomy.rs  — extract_description(): content-aware file summaries for 9 languages
-├── db.rs       — open_db(), run_migrations(), normalize_path(), project_from_cwd(), truncate_utf8()
-├── schema.rs   — SQL DDL constants (CREATE TABLE, CREATE INDEX, FTS5)
-├── models.rs   — Serde-enabled structs: Session, Message, ToolCall, Bug, etc.
-└── jsonl.rs    — parse_line() → Record enum, extract_file_path(), extract_tool_input_summary()
+├── anatomy.rs   — extract_description(): content-aware file summaries for 9 languages
+├── compress.rs  — Caveman compression: LLM-based text compression via `claude --print`, validation, batch support
+├── db.rs        — open_db(), run_migrations(), normalize_path(), project_from_cwd(), truncate_utf8()
+├── schema.rs    — SQL DDL constants (CREATE TABLE, CREATE INDEX, FTS5)
+├── models.rs    — Serde-enabled structs: Session, Message, ToolCall, Bug, etc.
+└── jsonl.rs     — parse_line() → Record enum, extract_file_path(), extract_tool_input_summary()
 ```
 
 ### JSONL Parser
@@ -54,7 +55,7 @@ cargo build -p memory-common
 cargo test -p memory-common
 ```
 
-34 tests covering database creation, migration idempotency, schema version skip, JSONL parsing (user messages, assistant messages, tool results, array content, missing usage, thinking block truncation, skip types, malformed lines), file path extraction, tool input summaries, path normalization, UTF-8 truncation (ASCII, emoji, CJK, empty, boundary), and anatomy extraction (Rust, Python, TypeScript, Java, Go, Markdown, TOML, empty, fallback).
+49 tests covering database creation, migration idempotency, schema version skip, JSONL parsing (user messages, assistant messages, tool results, array content, missing usage, thinking block truncation, skip types, malformed lines), file path extraction, tool input summaries, path normalization, UTF-8 truncation (ASCII, emoji, CJK, empty, boundary), and anatomy extraction (Rust, Python, TypeScript, Java, Go, Markdown, TOML, empty, fallback).
 
 ## Database Schema
 

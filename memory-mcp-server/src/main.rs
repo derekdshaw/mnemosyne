@@ -333,15 +333,22 @@ impl MnemosyneServer {
             ));
         }
         let content = truncate_utf8(&input.content, 10_000);
+        let compressed = input.compress.unwrap_or(false);
+        // When compressed, estimate original length (~80% compression ratio)
+        let original_length: Option<i64> = if compressed {
+            Some((content.len() as f64 / 0.8) as i64)
+        } else {
+            None
+        };
 
         let conn = self
             .db
             .lock()
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
         conn.execute(
-            "INSERT INTO context_items (project, category, content, created_at) \
-             VALUES (?1, ?2, ?3, datetime('now'))",
-            rusqlite::params![input.project, input.category, content],
+            "INSERT INTO context_items (project, category, content, created_at, original_length) \
+             VALUES (?1, ?2, ?3, datetime('now'), ?4)",
+            rusqlite::params![input.project, input.category, content, original_length],
         )
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
@@ -352,9 +359,10 @@ impl MnemosyneServer {
         )
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
+        let suffix = if compressed { ", compressed" } else { "" };
         Ok(Json(SimpleResult {
             success: true,
-            message: format!("Context saved (id: {id})"),
+            message: format!("Context saved (id: {id}{suffix})"),
         }))
     }
 
@@ -525,6 +533,14 @@ impl MnemosyneServer {
             .root_cause
             .as_deref()
             .map(|s| truncate_utf8(s, 10_000));
+        let compressed = input.compress.unwrap_or(false);
+        // When compressed, estimate original length of fix_description + root_cause
+        let original_length: Option<i64> = if compressed {
+            let compressed_len = fix_description.len() + root_cause.as_ref().map_or(0, |s| s.len());
+            Some((compressed_len as f64 / 0.8) as i64)
+        } else {
+            None
+        };
 
         let conn = self
             .db
@@ -534,8 +550,8 @@ impl MnemosyneServer {
 
         // M4: Use input.project instead of hardcoded NULL
         conn.execute(
-            "INSERT INTO bugs (project, error_message, root_cause, fix_description, tags, file_path, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
+            "INSERT INTO bugs (project, error_message, root_cause, fix_description, tags, file_path, created_at, original_length) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), ?7)",
             rusqlite::params![
                 input.project,
                 error_message,
@@ -543,6 +559,7 @@ impl MnemosyneServer {
                 fix_description,
                 input.tags,
                 file_path,
+                original_length,
             ],
         )
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
@@ -562,9 +579,10 @@ impl MnemosyneServer {
         )
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
+        let suffix = if compressed { ", compressed" } else { "" };
         Ok(Json(SimpleResult {
             success: true,
-            message: format!("Bug logged (id: {id})"),
+            message: format!("Bug logged (id: {id}{suffix})"),
         }))
     }
 
@@ -1163,6 +1181,7 @@ mod tests {
             content: "Arena allocators prevent drop-time regression".to_string(),
             category: "architecture".to_string(),
             project: Some("test_proj".to_string()),
+            ..Default::default()
         }));
         assert!(save_result.is_ok());
 
@@ -1183,7 +1202,7 @@ mod tests {
         let result = server.save_context(Parameters(SaveContextInput {
             content: "".to_string(),
             category: "test".to_string(),
-            project: None,
+            ..Default::default()
         }));
         assert!(result.is_err());
     }
@@ -1195,7 +1214,7 @@ mod tests {
         let result = server.save_context(Parameters(SaveContextInput {
             content: long_content,
             category: "test".to_string(),
-            project: None,
+            ..Default::default()
         }));
         assert!(result.is_ok());
 
@@ -1220,6 +1239,7 @@ mod tests {
             tags: Some("safety".to_string()),
             file_path: Some("src/main.rs".to_string()),
             project: Some("test_proj".to_string()),
+            ..Default::default()
         }));
         assert!(log_result.is_ok());
 
@@ -1240,10 +1260,8 @@ mod tests {
             .log_bug(Parameters(LogBugInput {
                 error_message: "perf regression".to_string(),
                 fix_description: "use arena".to_string(),
-                root_cause: None,
                 tags: Some("perf,memory".to_string()),
-                file_path: None,
-                project: None,
+                ..Default::default()
             }))
             .unwrap();
 
@@ -1262,10 +1280,7 @@ mod tests {
         let result = server.log_bug(Parameters(LogBugInput {
             error_message: "".to_string(),
             fix_description: "some fix".to_string(),
-            root_cause: None,
-            tags: None,
-            file_path: None,
-            project: None,
+            ..Default::default()
         }));
         assert!(result.is_err());
     }
@@ -1423,16 +1438,15 @@ mod tests {
                 content: "test context".to_string(),
                 category: "arch".to_string(),
                 project: Some("proj".to_string()),
+                ..Default::default()
             }))
             .unwrap();
         server
             .log_bug(Parameters(LogBugInput {
                 error_message: "test bug".to_string(),
                 fix_description: "test fix".to_string(),
-                root_cause: None,
-                tags: None,
-                file_path: None,
                 project: Some("proj".to_string()),
+                ..Default::default()
             }))
             .unwrap();
         server

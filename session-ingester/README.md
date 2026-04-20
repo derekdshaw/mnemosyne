@@ -14,7 +14,7 @@ Designed to run automatically via hooks:
 
 ```
 main.rs
-├── CLI parsing (clap): --claude-dir, --verbose, --session-id, --from-stdin
+├── CLI parsing (clap): --claude-dir, --verbose, --session-id, --from-stdin, --compress-existing
 ├── Scans ~/.claude/projects/*/*.jsonl
 ├── For each file:
 │   ├── Checks ingestion_log (skip if file_size + file_mtime unchanged)
@@ -73,5 +73,7 @@ Options:
   --verbose                Print verbose output
   --session-id <UUID>      Ingest a specific session immediately (bypasses active-session guard)
   --from-stdin             Read session_id from stdin JSON (for SessionEnd hook)
+  --compress-existing      Compress existing uncompressed data using caveman compression
+                           via `claude --print`. Idempotent — skips already-compressed rows.
   -h, --help               Print help
 ```
