@@ -235,8 +235,8 @@ Write-Host @"
   at startup via the SessionStart hook — no manual tool call needed.
 
   When working:
-  - When you fix a bug, call ``log_bug`` with the error message, root cause, and fix description.
+  - When you fix a bug, call ``log_bug`` with the error message, root cause, and fix description. Set ``compress: true`` for prose-heavy descriptions.
   - When the user corrects your approach, call ``add_do_not_repeat`` to remember the lesson.
-  - When we make an architectural decision, call ``save_context`` with category "architecture".
+  - When we make an architectural decision, call ``save_context`` with category "architecture" and ``compress: true``. Write content in caveman format: remove articles, use fragments, cut filler words, but preserve code/URLs/paths exactly.
   - After investigating a file's history, call ``get_file_history`` to see past changes and context.
 "@
