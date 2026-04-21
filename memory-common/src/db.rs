@@ -49,6 +49,16 @@ pub fn open_db() -> Result<Connection> {
     Ok(conn)
 }
 
+/// Runs `PRAGMA wal_checkpoint(TRUNCATE)` so a subsequent close doesn't leave
+/// WAL frames pinned on disk. Intended to be called just before the MCP server
+/// process exits — the in-memory sqlite automatic checkpointer doesn't always
+/// flush before the process is killed, which left us with a 5 MB WAL pinning
+/// the DB across sessions.
+pub fn checkpoint_wal(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    Ok(())
+}
+
 /// Opens an in-memory database for testing. Available to all crates in the workspace.
 pub fn open_db_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
@@ -201,6 +211,51 @@ mod tests {
         let conn = open_db_in_memory().expect("first open");
         // Run migrations again — should not fail
         run_migrations(&conn).expect("second migration run should succeed");
+    }
+
+    #[test]
+    fn test_checkpoint_wal_truncates() {
+        // File-backed DB so the WAL file is observable on disk.
+        let dir = std::env::temp_dir();
+        let db_path = dir.join(format!(
+            "mnemosyne_checkpoint_test_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let wal_path = db_path.with_extension("db-wal");
+        let shm_path = db_path.with_extension("db-shm");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+            conn.execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
+            for i in 0..50 {
+                conn.execute("INSERT INTO t VALUES (?1)", [i]).unwrap();
+            }
+            // With WAL mode, uncheckpointed writes leave the WAL file non-empty.
+            let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+            assert!(
+                wal_size > 0,
+                "expected WAL to have data before checkpoint, got {wal_size} bytes"
+            );
+
+            checkpoint_wal(&conn).expect("checkpoint should succeed");
+        }
+
+        // After connection is dropped, the WAL file exists but should be 0 bytes
+        // (TRUNCATE mode zero-truncates the file in place).
+        let wal_size_after = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(
+            wal_size_after, 0,
+            "WAL should be truncated to 0 bytes after checkpoint"
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&wal_path);
+        let _ = std::fs::remove_file(&shm_path);
     }
 
     #[test]
