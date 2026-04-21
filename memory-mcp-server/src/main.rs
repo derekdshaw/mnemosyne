@@ -97,11 +97,7 @@ impl MnemosyneServer {
     /// Internal helper that bumps activity, runs `f` on the blocking pool, and
     /// enforces `timeout`. Factored out so tests can drive a short deadline
     /// without touching production constants.
-    async fn run_db_with_timeout<F, T>(
-        &self,
-        timeout: Duration,
-        f: F,
-    ) -> Result<T, rmcp::ErrorData>
+    async fn run_db_with_timeout<F, T>(&self, timeout: Duration, f: F) -> Result<T, rmcp::ErrorData>
     where
         F: FnOnce(&Connection) -> Result<T, rmcp::ErrorData> + Send + 'static,
         T: Send + 'static,
