@@ -125,6 +125,7 @@ fn humanize_ago(read_at: &str) -> String {
 mod tests {
     use super::*;
     use crate::HookInput;
+    use memory_common::anatomy::SymbolKind;
     use serde_json::json;
 
     fn make_input() -> HookInput {
@@ -189,7 +190,7 @@ mod tests {
     fn test_format_symbols_truncation() {
         let syms: Vec<Symbol> = (1..=10)
             .map(|i| Symbol {
-                kind: "fn".into(),
+                kind: SymbolKind::Fn,
                 name: format!("fn{i}"),
                 line: i as u32,
             })

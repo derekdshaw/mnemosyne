@@ -8,19 +8,59 @@
 //! Stored in the `file_anatomy` table: `description` holds the one-liner
 //! summary and `top_symbols_json` holds a JSON-encoded `Vec<Symbol>`.
 
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 
 use crate::db::truncate_utf8;
+
+/// Kind tag for a [`Symbol`]. Serializes to the lowercase variant name
+/// (e.g. `SymbolKind::Fn` → `"fn"`) for JSON storage compatibility.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SymbolKind {
+    Fn,
+    Struct,
+    Enum,
+    Trait,
+    Type,
+    Const,
+    Mod,
+    Class,
+    Interface,
+    Def,
+    Method,
+    Record,
+}
 
 /// A code symbol surfaced by the anatomy scan, with its line number so the
 /// pre-read hook can render `name@line` hints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Symbol {
-    /// Short kind tag: `fn`, `struct`, `enum`, `trait`, `type`, `const`,
-    /// `mod`, `class`, `interface`, `def`, `method`, `record`.
-    pub kind: String,
+    pub kind: SymbolKind,
     pub name: String,
     pub line: u32,
+}
+
+static GRADLE_DEP_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?:implementation|api|compile|testImplementation|runtimeOnly)\s*\(?\s*["']([^"':]+):([^"':]+):([^"']+)["']"#,
+    )
+    .unwrap()
+});
+
+static GEMFILE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"gem\s+['"]([^'"]+)['"](?:\s*,\s*['"]([^'"]+)['"])?"#).unwrap()
+});
+
+/// Extract the text between `<tag>` and `</tag>` without a regex. Returns the
+/// first match or `None` if either delimiter is missing. Allocation-free:
+/// returns a borrowed slice of `haystack`.
+fn extract_xml_tag<'a>(haystack: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = haystack.find(open)? + open.len();
+    let rest = &haystack[start..];
+    let end = rest.find(close)?;
+    Some(rest[..end].trim())
 }
 
 /// Anatomy for a single file: a one-line summary plus (for code files) a
@@ -123,25 +163,26 @@ fn extract_rust(content: &str) -> AnatomyData {
             continue;
         }
 
-        let (kind, after) = if let Some(rest) = trimmed.strip_prefix("pub fn ") {
-            ("fn", rest)
-        } else if let Some(rest) = trimmed.strip_prefix("pub async fn ") {
-            ("fn", rest)
-        } else if let Some(rest) = trimmed.strip_prefix("pub struct ") {
-            ("struct", rest)
-        } else if let Some(rest) = trimmed.strip_prefix("pub enum ") {
-            ("enum", rest)
-        } else if let Some(rest) = trimmed.strip_prefix("pub trait ") {
-            ("trait", rest)
-        } else if let Some(rest) = trimmed.strip_prefix("pub type ") {
-            ("type", rest)
-        } else if let Some(rest) = trimmed.strip_prefix("pub const ") {
-            ("const", rest)
-        } else if let Some(rest) = trimmed.strip_prefix("pub mod ") {
-            ("mod", rest)
-        } else {
-            continue;
-        };
+        let (kind, sig_prefix, after): (SymbolKind, &str, &str) =
+            if let Some(rest) = trimmed.strip_prefix("pub fn ") {
+                (SymbolKind::Fn, "pub fn", rest)
+            } else if let Some(rest) = trimmed.strip_prefix("pub async fn ") {
+                (SymbolKind::Fn, "pub async fn", rest)
+            } else if let Some(rest) = trimmed.strip_prefix("pub struct ") {
+                (SymbolKind::Struct, "pub struct", rest)
+            } else if let Some(rest) = trimmed.strip_prefix("pub enum ") {
+                (SymbolKind::Enum, "pub enum", rest)
+            } else if let Some(rest) = trimmed.strip_prefix("pub trait ") {
+                (SymbolKind::Trait, "pub trait", rest)
+            } else if let Some(rest) = trimmed.strip_prefix("pub type ") {
+                (SymbolKind::Type, "pub type", rest)
+            } else if let Some(rest) = trimmed.strip_prefix("pub const ") {
+                (SymbolKind::Const, "pub const", rest)
+            } else if let Some(rest) = trimmed.strip_prefix("pub mod ") {
+                (SymbolKind::Mod, "pub mod", rest)
+            } else {
+                continue;
+            };
 
         let name = after
             .split(['(', '{', '<', ':', ' ', ';'])
@@ -153,20 +194,9 @@ fn extract_rust(content: &str) -> AnatomyData {
             continue;
         }
 
-        // Preserve the existing description format exactly.
-        let sig_prefix = match kind {
-            "fn" => "pub fn",
-            "struct" => "pub struct",
-            "enum" => "pub enum",
-            "trait" => "pub trait",
-            "type" => "pub type",
-            "const" => "pub const",
-            "mod" => "pub mod",
-            _ => "pub",
-        };
         signatures.push(format!("{sig_prefix} {name}"));
         symbols.push(Symbol {
-            kind: kind.to_string(),
+            kind,
             name,
             line: line_no,
         });
@@ -206,15 +236,16 @@ fn extract_python(content: &str) -> AnatomyData {
         let trimmed = line.trim();
         let line_no = (idx + 1) as u32;
 
-        let (kind, after) = if let Some(rest) = trimmed.strip_prefix("def ") {
-            ("def", rest)
-        } else if let Some(rest) = trimmed.strip_prefix("async def ") {
-            ("def", rest)
-        } else if let Some(rest) = trimmed.strip_prefix("class ") {
-            ("class", rest)
-        } else {
-            continue;
-        };
+        let (kind, label, after): (SymbolKind, &str, &str) =
+            if let Some(rest) = trimmed.strip_prefix("def ") {
+                (SymbolKind::Def, "def", rest)
+            } else if let Some(rest) = trimmed.strip_prefix("async def ") {
+                (SymbolKind::Def, "def", rest)
+            } else if let Some(rest) = trimmed.strip_prefix("class ") {
+                (SymbolKind::Class, "class", rest)
+            } else {
+                continue;
+            };
 
         let name = after
             .split(['(', ':', ' '])
@@ -229,10 +260,10 @@ fn extract_python(content: &str) -> AnatomyData {
         // Skip dunder/private for cleaner output but still include in symbols
         let is_top_level = !line.starts_with(' ') && !line.starts_with('\t');
         if is_top_level {
-            names.push(format!("{kind} {name}"));
+            names.push(format!("{label} {name}"));
         }
         symbols.push(Symbol {
-            kind: kind.to_string(),
+            kind,
             name,
             line: line_no,
         });
@@ -271,25 +302,26 @@ fn extract_js_ts(content: &str) -> AnatomyData {
         let trimmed = line.trim();
         let line_no = (idx + 1) as u32;
 
-        let (kind, sig_prefix, after) = if let Some(r) = trimmed.strip_prefix("export function ") {
-            ("fn", "export function", r)
-        } else if let Some(r) = trimmed.strip_prefix("export async function ") {
-            ("fn", "export async function", r)
-        } else if let Some(r) = trimmed.strip_prefix("export class ") {
-            ("class", "export class", r)
-        } else if let Some(r) = trimmed.strip_prefix("export interface ") {
-            ("interface", "export interface", r)
-        } else if let Some(r) = trimmed.strip_prefix("export type ") {
-            ("type", "export type", r)
-        } else if let Some(r) = trimmed.strip_prefix("export const ") {
-            ("const", "export const", r)
-        } else if let Some(r) = trimmed.strip_prefix("export default function ") {
-            ("fn", "export default function", r)
-        } else if let Some(r) = trimmed.strip_prefix("export default class ") {
-            ("class", "export default class", r)
-        } else {
-            continue;
-        };
+        let (kind, sig_prefix, after): (SymbolKind, &str, &str) =
+            if let Some(r) = trimmed.strip_prefix("export function ") {
+                (SymbolKind::Fn, "export function", r)
+            } else if let Some(r) = trimmed.strip_prefix("export async function ") {
+                (SymbolKind::Fn, "export async function", r)
+            } else if let Some(r) = trimmed.strip_prefix("export class ") {
+                (SymbolKind::Class, "export class", r)
+            } else if let Some(r) = trimmed.strip_prefix("export interface ") {
+                (SymbolKind::Interface, "export interface", r)
+            } else if let Some(r) = trimmed.strip_prefix("export type ") {
+                (SymbolKind::Type, "export type", r)
+            } else if let Some(r) = trimmed.strip_prefix("export const ") {
+                (SymbolKind::Const, "export const", r)
+            } else if let Some(r) = trimmed.strip_prefix("export default function ") {
+                (SymbolKind::Fn, "export default function", r)
+            } else if let Some(r) = trimmed.strip_prefix("export default class ") {
+                (SymbolKind::Class, "export default class", r)
+            } else {
+                continue;
+            };
 
         let name = after
             .split(['(', '{', '<', '=', ':', ' ', ';'])
@@ -303,7 +335,7 @@ fn extract_js_ts(content: &str) -> AnatomyData {
 
         exports.push(format!("{sig_prefix} {name}"));
         symbols.push(Symbol {
-            kind: kind.to_string(),
+            kind,
             name,
             line: line_no,
         });
@@ -351,43 +383,44 @@ fn extract_java(content: &str) -> AnatomyData {
         let trimmed = line.trim();
         let line_no = (idx + 1) as u32;
 
-        let (kind, sig_prefix, after) = if let Some(r) = trimmed.strip_prefix("public class ") {
-            ("class", "public class", r)
-        } else if let Some(r) = trimmed.strip_prefix("public interface ") {
-            ("interface", "public interface", r)
-        } else if let Some(r) = trimmed.strip_prefix("public enum ") {
-            ("enum", "public enum", r)
-        } else if let Some(r) = trimmed.strip_prefix("public record ") {
-            ("record", "public record", r)
-        } else if let Some(r) = trimmed.strip_prefix("public abstract class ") {
-            ("class", "public abstract class", r)
-        } else if trimmed.starts_with("public ")
-            && trimmed.contains('(')
-            && !trimmed.contains("class ")
-        {
-            // Public method signature, e.g. "public void login(String u, String p) {"
-            let sig = trimmed
-                .split('{')
-                .next()
-                .unwrap_or(trimmed)
-                .trim()
-                .trim_end_matches(';')
-                .trim();
-            declarations.push(sig.to_string());
-            if let Some(paren) = sig.find('(') {
-                let before = &sig[..paren];
-                if let Some(name) = before.split_whitespace().last() {
-                    symbols.push(Symbol {
-                        kind: "method".to_string(),
-                        name: name.to_string(),
-                        line: line_no,
-                    });
+        let (kind, sig_prefix, after): (SymbolKind, &str, &str) =
+            if let Some(r) = trimmed.strip_prefix("public class ") {
+                (SymbolKind::Class, "public class", r)
+            } else if let Some(r) = trimmed.strip_prefix("public interface ") {
+                (SymbolKind::Interface, "public interface", r)
+            } else if let Some(r) = trimmed.strip_prefix("public enum ") {
+                (SymbolKind::Enum, "public enum", r)
+            } else if let Some(r) = trimmed.strip_prefix("public record ") {
+                (SymbolKind::Record, "public record", r)
+            } else if let Some(r) = trimmed.strip_prefix("public abstract class ") {
+                (SymbolKind::Class, "public abstract class", r)
+            } else if trimmed.starts_with("public ")
+                && trimmed.contains('(')
+                && !trimmed.contains("class ")
+            {
+                // Public method signature, e.g. "public void login(String u, String p) {"
+                let sig = trimmed
+                    .split('{')
+                    .next()
+                    .unwrap_or(trimmed)
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim();
+                declarations.push(sig.to_string());
+                if let Some(paren) = sig.find('(') {
+                    let before = &sig[..paren];
+                    if let Some(name) = before.split_whitespace().last() {
+                        symbols.push(Symbol {
+                            kind: SymbolKind::Method,
+                            name: name.to_string(),
+                            line: line_no,
+                        });
+                    }
                 }
-            }
-            continue;
-        } else {
-            continue;
-        };
+                continue;
+            } else {
+                continue;
+            };
 
         let name = after
             .split(['{', '<', '(', ' '])
@@ -400,7 +433,7 @@ fn extract_java(content: &str) -> AnatomyData {
         }
         declarations.push(format!("{sig_prefix} {name}"));
         symbols.push(Symbol {
-            kind: kind.to_string(),
+            kind,
             name,
             line: line_no,
         });
@@ -457,7 +490,7 @@ fn extract_go(content: &str) -> AnatomyData {
             if !name.is_empty() && name.starts_with(|c: char| c.is_uppercase()) {
                 exports.push(format!("func {name}"));
                 symbols.push(Symbol {
-                    kind: "fn".to_string(),
+                    kind: SymbolKind::Fn,
                     name: name.to_string(),
                     line: line_no,
                 });
@@ -468,7 +501,7 @@ fn extract_go(content: &str) -> AnatomyData {
                 let go_kind = after_type.split_whitespace().nth(1).unwrap_or("type");
                 exports.push(format!("type {name} {go_kind}"));
                 symbols.push(Symbol {
-                    kind: "type".to_string(),
+                    kind: SymbolKind::Type,
                     name: name.to_string(),
                     line: line_no,
                 });
@@ -920,37 +953,30 @@ fn extract_go_mod(content: &str) -> String {
 }
 
 fn extract_pom_xml(content: &str) -> String {
-    let art_re = regex::Regex::new(r"<artifactId>\s*([^<]+?)\s*</artifactId>").unwrap();
-    let ver_re = regex::Regex::new(r"<version>\s*([^<]+?)\s*</version>").unwrap();
-    let dep_block_re = regex::Regex::new(r"(?s)<dependency>(.*?)</dependency>").unwrap();
+    // Pom files are mostly small but we still avoid regex compilation on the
+    // hot path: split() + extract_xml_tag is allocation-free and doesn't pay
+    // the NFA-construction cost a fresh `regex::Regex::new` would.
 
+    // Project identity: first <artifactId>/<version> *before* <dependencies>.
     let deps_idx = content.find("<dependencies>").unwrap_or(content.len());
     let project_section = &content[..deps_idx];
+    let project_id = extract_xml_tag(project_section, "<artifactId>", "</artifactId>")
+        .unwrap_or("")
+        .to_string();
+    let project_ver = extract_xml_tag(project_section, "<version>", "</version>")
+        .unwrap_or("")
+        .to_string();
 
-    let project_id = art_re
-        .captures(project_section)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().trim().to_string())
-        .unwrap_or_default();
-    let project_ver = ver_re
-        .captures(project_section)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().trim().to_string())
-        .unwrap_or_default();
-
-    let deps: Vec<(String, String)> = dep_block_re
-        .captures_iter(content)
-        .filter_map(|c| {
-            let block = c.get(1)?.as_str();
-            let name = art_re
-                .captures(block)
-                .and_then(|c| c.get(1))
-                .map(|m| m.as_str().trim().to_string())?;
-            let ver = ver_re
-                .captures(block)
-                .and_then(|c| c.get(1))
-                .map(|m| m.as_str().trim().to_string())
-                .unwrap_or_default();
+    // Each <dependency>...</dependency> block.
+    let deps: Vec<(String, String)> = content
+        .split("<dependency>")
+        .skip(1)
+        .filter_map(|chunk| {
+            let block = chunk.split_once("</dependency>")?.0;
+            let name = extract_xml_tag(block, "<artifactId>", "</artifactId>")?.to_string();
+            let ver = extract_xml_tag(block, "<version>", "</version>")
+                .unwrap_or("")
+                .to_string();
             Some((name, ver))
         })
         .collect();
@@ -975,13 +1001,8 @@ fn extract_pom_xml(content: &str) -> String {
 }
 
 fn extract_gradle(content: &str) -> String {
-    // Match: implementation 'group:name:version' or implementation("group:name:version")
-    let re = regex::Regex::new(
-        r#"(?:implementation|api|compile|testImplementation|runtimeOnly)\s*\(?\s*["']([^"':]+):([^"':]+):([^"']+)["']"#,
-    )
-    .unwrap();
-
-    let deps: Vec<(String, String)> = re
+    // Matches: implementation 'group:name:version' or implementation("group:name:version")
+    let deps: Vec<(String, String)> = GRADLE_DEP_RE
         .captures_iter(content)
         .map(|c| {
             let name = c.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
@@ -1020,8 +1041,7 @@ fn extract_requirements_txt(content: &str) -> String {
 }
 
 fn extract_gemfile(content: &str) -> String {
-    let re = regex::Regex::new(r#"gem\s+['"]([^'"]+)['"](?:\s*,\s*['"]([^'"]+)['"])?"#).unwrap();
-    let deps: Vec<(String, String)> = re
+    let deps: Vec<(String, String)> = GEMFILE_RE
         .captures_iter(content)
         .map(|c| {
             let name = c.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
@@ -1103,7 +1123,7 @@ mod tests {
         assert!(data.description.contains("pub fn parse_pack"));
         assert_eq!(data.symbols.len(), 1);
         assert_eq!(data.symbols[0].name, "parse_pack");
-        assert_eq!(data.symbols[0].kind, "fn");
+        assert_eq!(data.symbols[0].kind, SymbolKind::Fn);
         assert_eq!(data.symbols[0].line, 6);
     }
 
