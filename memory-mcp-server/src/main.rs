@@ -15,9 +15,68 @@ use rusqlite::types::{ToSql, ToSqlOutput};
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Notify;
 use tools::*;
+
+/// Waits for any shutdown signal the host OS exposes, then returns. On unix
+/// that's SIGTERM / SIGHUP / SIGINT; on Windows it's ctrl_c / ctrl_break /
+/// ctrl_close / ctrl_shutdown. Returning from this future is the cue for the
+/// caller to fire the shutdown notifier.
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("failed to install SIGTERM handler: {e}");
+            return;
+        }
+    };
+    let mut sighup = match signal(SignalKind::hangup()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("failed to install SIGHUP handler: {e}");
+            return;
+        }
+    };
+    tokio::select! {
+        _ = sigterm.recv() => tracing::info!("SIGTERM received"),
+        _ = sighup.recv() => tracing::info!("SIGHUP received"),
+        _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received"),
+    }
+}
+
+#[cfg(windows)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+    let mut br = match ctrl_break() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("failed to install ctrl_break handler: {e}");
+            return;
+        }
+    };
+    let mut cl = match ctrl_close() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("failed to install ctrl_close handler: {e}");
+            return;
+        }
+    };
+    let mut sd = match ctrl_shutdown() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("failed to install ctrl_shutdown handler: {e}");
+            return;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => tracing::info!("ctrl_c received"),
+        _ = br.recv() => tracing::info!("ctrl_break received"),
+        _ = cl.recv() => tracing::info!("ctrl_close received"),
+        _ = sd.recv() => tracing::info!("ctrl_shutdown received"),
+    }
+}
 
 /// Maximum time any single tool handler may run before we return an error.
 /// Defense against a wedged SQL call pinning the whole stdio service.
@@ -1208,28 +1267,10 @@ async fn main() -> Result<()> {
         shutdown.clone(),
     );
 
-    // Signal handlers. Any one of SIGTERM/SIGHUP/SIGINT triggers graceful shutdown.
+    // Cross-platform signal handler: any OS shutdown signal triggers graceful exit.
     let shutdown_sig = shutdown.clone();
     tokio::spawn(async move {
-        let mut sigterm = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("failed to install SIGTERM handler: {e}");
-                return;
-            }
-        };
-        let mut sighup = match signal(SignalKind::hangup()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("failed to install SIGHUP handler: {e}");
-                return;
-            }
-        };
-        tokio::select! {
-            _ = sigterm.recv() => tracing::info!("SIGTERM received"),
-            _ = sighup.recv() => tracing::info!("SIGHUP received"),
-            _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received"),
-        }
+        wait_for_shutdown_signal().await;
         shutdown_sig.notify_waiters();
     });
 
