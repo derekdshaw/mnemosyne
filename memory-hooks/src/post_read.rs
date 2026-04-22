@@ -34,29 +34,38 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
         rusqlite::params![session_id, file_path, token_estimate],
     )?;
 
-    // Extract a meaningful description from file content so the pre-read hook
-    // can show Claude useful context — helping it decide whether to re-read
-    // the file or rely on the summary.
+    // Extract a meaningful description plus symbol-line index from file content
+    // so the pre-read hook can show Claude useful context — helping it decide
+    // whether to re-read the file or rely on the summary.
     if let Some(ref proj) = project {
-        let description = match content_str {
-            Some(content) => anatomy::extract_description(content, &file_path),
+        let (description, symbols_json) = match content_str {
+            Some(content) => {
+                let anatomy = anatomy::extract_anatomy(content, &file_path);
+                let json = if anatomy.symbols.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&anatomy.symbols).ok()
+                };
+                (anatomy.description, json)
+            }
             None => {
                 let filename = file_path.rsplit('/').next().unwrap_or(&file_path);
-                format!("File: {filename}")
+                (format!("File: {filename}"), None)
             }
         };
 
         // UPSERT: on first read, insert anatomy. On subsequent reads, update
         // the description (file content may have changed) and increment count.
         conn.execute(
-            "INSERT INTO file_anatomy (project, file_path, description, estimated_tokens, last_scanned, times_read, times_written) \
-             VALUES (?1, ?2, ?3, ?4, datetime('now'), 1, 0) \
+            "INSERT INTO file_anatomy (project, file_path, description, estimated_tokens, last_scanned, times_read, times_written, top_symbols_json) \
+             VALUES (?1, ?2, ?3, ?4, datetime('now'), 1, 0, ?5) \
              ON CONFLICT(project, file_path) DO UPDATE SET \
              times_read = times_read + 1, \
              description = ?3, \
              estimated_tokens = ?4, \
-             last_scanned = datetime('now')",
-            rusqlite::params![proj, file_path, description, token_estimate],
+             last_scanned = datetime('now'), \
+             top_symbols_json = ?5",
+            rusqlite::params![proj, file_path, description, token_estimate, symbols_json],
         )?;
     }
 
@@ -132,6 +141,24 @@ mod tests {
             "got: {description}"
         );
         assert!(description.contains("pub fn main"), "got: {description}");
+    }
+
+    #[test]
+    fn test_post_read_persists_symbols() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        run(&conn, &make_input()).unwrap();
+
+        let symbols_json: Option<String> = conn
+            .query_row(
+                "SELECT top_symbols_json FROM file_anatomy WHERE project = 'myproject'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let json = symbols_json.expect("top_symbols_json should be populated for a .rs file");
+        assert!(json.contains("\"name\":\"main\""), "got: {json}");
+        assert!(json.contains("\"kind\":\"fn\""), "got: {json}");
+        assert!(json.contains("\"line\":2"), "got: {json}");
     }
 
     #[test]

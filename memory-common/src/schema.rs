@@ -135,6 +135,7 @@ pub const CREATE_FILE_ANATOMY: &str = "\
         last_scanned TEXT,\
         times_read INTEGER DEFAULT 0,\
         times_written INTEGER DEFAULT 0,\
+        top_symbols_json TEXT,\
         PRIMARY KEY (project, file_path)\
     );\
 ";

@@ -76,7 +76,7 @@ fn setup_pragmas(conn: &Connection) -> Result<()> {
 }
 
 /// Current schema version. Bump this whenever schema changes.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Runs schema migrations only if the database is behind the current version.
 /// Uses PRAGMA user_version to skip all migration work when schema is current.
@@ -139,6 +139,11 @@ fn run_migrations_unconditionally(conn: &Connection) -> Result<()> {
     add_column_if_not_exists(conn, "context_items", "original_length", "INTEGER")?;
     add_column_if_not_exists(conn, "messages", "original_length", "INTEGER")?;
     add_column_if_not_exists(conn, "bugs", "original_length", "INTEGER")?;
+
+    // V3: Symbol-line index on file_anatomy. JSON-encoded array of [kind, name, line]
+    // triples so the pre-read hook can let Claude jump straight to a symbol instead
+    // of reading the whole file.
+    add_column_if_not_exists(conn, "file_anatomy", "top_symbols_json", "TEXT")?;
 
     Ok(())
 }
