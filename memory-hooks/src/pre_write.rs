@@ -3,16 +3,19 @@
 use anyhow::Result;
 use memory_common::db::{normalize_path, truncate_utf8};
 use rusqlite::Connection;
+use std::fmt::Write as _;
 
 use crate::HookInput;
 
-pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
+pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
     let file_path = match input.file_path() {
         Some(fp) => fp,
-        None => return Ok(()),
+        None => return Ok(0),
     };
     let project = input.project();
     let filename = file_path.rsplit('/').next().unwrap_or(&file_path);
+
+    let mut buf = String::new();
 
     // Check bugs database for this file
     let mut stmt = conn.prepare(
@@ -33,7 +36,10 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
         // C3: Use truncate_utf8 for safe multi-byte truncation
         let error_short = truncate_utf8(error_msg, 100);
         let fix_short = truncate_utf8(fix_desc, 100);
-        eprintln!("\u{1f41b} Known bug on {filename}: {error_short} \u{2014} Fix: {fix_short}");
+        writeln!(
+            buf,
+            "\u{1f41b} Known bug on {filename}: {error_short} \u{2014} Fix: {fix_short}"
+        )?;
     }
 
     // Check do-not-repeat rules
@@ -58,11 +64,13 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
                 .as_deref()
                 .map(|r| format!(" \u{2014} Reason: {r}"))
                 .unwrap_or_default();
-            eprintln!("\u{1f6ab} Do not: {rule}{reason_str}");
+            writeln!(buf, "\u{1f6ab} Do not: {rule}{reason_str}")?;
         }
     }
 
-    Ok(())
+    let bytes = buf.len();
+    eprint!("{buf}");
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -85,7 +93,7 @@ mod tests {
     fn test_pre_write_no_bugs() {
         let conn = memory_common::db::open_db_in_memory().unwrap();
         // No bugs or do_not_repeat rules — should return Ok
-        assert!(run(&conn, &make_input()).is_ok());
+        let _ = run(&conn, &make_input()).unwrap();
     }
 
     #[test]
@@ -96,7 +104,17 @@ mod tests {
              VALUES ('myproject', 'null pointer', 'add null check', 'D:/r/myproject/src/main.rs', datetime('now'))",
             [],
         ).unwrap();
-        // Should return Ok (stderr warning emitted)
-        assert!(run(&conn, &make_input()).is_ok());
+        let bytes = run(&conn, &make_input()).unwrap();
+        assert!(bytes > 0, "matched-bug warning should contribute overhead");
+    }
+
+    #[test]
+    fn test_pre_write_returns_zero_when_nothing_matches() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        let bytes = run(&conn, &make_input()).unwrap();
+        assert_eq!(
+            bytes, 0,
+            "no bugs and no DNR rules → no stderr emission, no overhead"
+        );
     }
 }

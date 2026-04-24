@@ -342,6 +342,17 @@ fn ingest_file(
                         result.tool_use_id,
                         timestamp,
                     ])?;
+
+                    tx.prepare_cached("DELETE FROM messages_fts WHERE uuid = ?1")?
+                        .execute([&result_uuid])?;
+                    tx.prepare_cached(
+                        "INSERT INTO messages_fts (uuid, session_id, content) VALUES (?1, ?2, ?3)",
+                    )?
+                    .execute(rusqlite::params![
+                        result_uuid,
+                        session_id,
+                        content_truncated
+                    ])?;
                 }
                 message_count += 1;
             }

@@ -76,7 +76,7 @@ fn setup_pragmas(conn: &Connection) -> Result<()> {
 }
 
 /// Current schema version. Bump this whenever schema changes.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Runs schema migrations only if the database is behind the current version.
 /// Uses PRAGMA user_version to skip all migration work when schema is current.
@@ -166,6 +166,37 @@ pub fn truncate_utf8(s: &str, max: usize) -> String {
     format!("{}...", &s[..end])
 }
 
+/// Record mnemosyne's own hook output as overhead in tokens added to Claude's
+/// context. Used to measure the cost side of mnemosyne's intervention (the
+/// savings side is tracked via `session_reads.token_estimate` + repeat detection).
+/// Uses the same `bytes / 3.5` heuristic as post-read so overhead and savings
+/// are directly comparable.
+pub fn record_overhead(
+    conn: &Connection,
+    session_id: Option<&str>,
+    project: Option<&str>,
+    hook_name: &str,
+    output_bytes: usize,
+) -> Result<()> {
+    if output_bytes == 0 {
+        return Ok(());
+    }
+    let estimated_tokens = (output_bytes as f64 / 3.5) as i64;
+    conn.execute(
+        "INSERT INTO mnemosyne_overhead \
+         (session_id, project, hook_name, output_bytes, estimated_tokens, emitted_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+        rusqlite::params![
+            session_id,
+            project,
+            hook_name,
+            output_bytes as i64,
+            estimated_tokens,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Derive a project name from a working directory path.
 /// Takes the last component of the path.
 pub fn project_from_cwd(cwd: &str) -> String {
@@ -208,7 +239,73 @@ mod tests {
         assert!(tables.contains(&"messages_fts".to_string()));
         assert!(tables.contains(&"context_fts".to_string()));
         assert!(tables.contains(&"bugs_fts".to_string()));
+        assert!(tables.contains(&"mnemosyne_overhead".to_string()));
         // do_not_repeat has no FTS table (exact match only, not free-text search)
+    }
+
+    #[test]
+    fn test_record_overhead_basic() {
+        let conn = open_db_in_memory().unwrap();
+        record_overhead(&conn, Some("s1"), Some("proj"), "session_start", 7).unwrap();
+
+        let (session_id, project, hook_name, output_bytes, estimated_tokens): (
+            String,
+            String,
+            String,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT session_id, project, hook_name, output_bytes, estimated_tokens \
+                 FROM mnemosyne_overhead",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(session_id, "s1");
+        assert_eq!(project, "proj");
+        assert_eq!(hook_name, "session_start");
+        assert_eq!(output_bytes, 7);
+        // 7 / 3.5 = 2 exactly
+        assert_eq!(estimated_tokens, 2);
+    }
+
+    #[test]
+    fn test_record_overhead_zero_is_noop() {
+        let conn = open_db_in_memory().unwrap();
+        record_overhead(&conn, Some("s1"), Some("proj"), "pre_read", 0).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mnemosyne_overhead", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "zero-byte output should not insert a row");
+    }
+
+    #[test]
+    fn test_record_overhead_null_session_and_project() {
+        let conn = open_db_in_memory().unwrap();
+        // Hook with no session_id / project (e.g., session_start before DB has any data)
+        record_overhead(&conn, None, None, "session_start", 500).unwrap();
+
+        let (session_id, project): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT session_id, project FROM mnemosyne_overhead",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(session_id.is_none());
+        assert!(project.is_none());
     }
 
     #[test]

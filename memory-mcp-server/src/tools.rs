@@ -248,41 +248,22 @@ pub struct DoNotRepeatList {
 
 // --- Analytics Input/Output ---
 
-#[derive(Debug, Deserialize, JsonSchema, Default)]
-pub struct GetTokenStatsInput {
-    /// Filter by project name
-    pub project: Option<String>,
-    /// Number of days to look back (default 30)
-    pub days: Option<i64>,
-}
-
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct TokenStatsReport {
-    pub period_days: i64,
-    pub project: Option<String>,
-    // Usage
-    pub total_sessions: i64,
-    pub total_input_tokens: i64,
-    pub total_output_tokens: i64,
-    pub total_cache_read_tokens: i64,
-    pub total_cache_creation_tokens: i64,
-    pub avg_input_per_session: i64,
-    pub avg_output_per_session: i64,
-    // Savings
-    pub files_with_anatomy: i64,
-    pub total_file_reads: i64,
-    pub repeated_reads_warned: i64,
-    pub estimated_tokens_saveable: i64,
-    // Top consumers
-    pub top_sessions_by_tokens: Vec<TokenSessionEntry>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TokenSessionEntry {
-    pub session_id: String,
-    pub project: Option<String>,
-    pub total_tokens: i64,
-    pub start_time: Option<String>,
+pub struct HookOverheadEntry {
+    pub hook_name: String,
+    pub invocations: i64,
+    pub estimated_tokens: i64,
+    /// Average tokens per invocation.
+    pub avg_tokens: f64,
+    /// Smallest single-invocation cost — a zero-output hook is filtered at insert,
+    /// so this is the minimum *non-trivial* briefing.
+    pub min_tokens: i64,
+    /// Largest single-invocation cost — use alongside `avg_tokens` to spot
+    /// outliers (a project with heavy accumulated context will push this up).
+    pub max_tokens: i64,
+    /// Standard deviation of tokens per invocation. Low stddev + high avg =
+    /// predictable overhead; high stddev = some sessions pay a lot more than others.
+    pub stddev_tokens: f64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
@@ -291,18 +272,28 @@ pub struct GetAnalyticsInput {
     pub project: Option<String>,
     /// Number of days to look back (default 30)
     pub days: Option<i64>,
+    /// Which section(s) to compute. "tokens" skips the productivity and
+    /// memory-health queries for a cheaper response; "full" (default) returns
+    /// everything. Omitted or any other value behaves like "full".
+    pub section: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AnalyticsReport {
     pub period_days: i64,
     pub project: Option<String>,
+    /// Echoes back which section was requested so callers can tell whether the
+    /// empty Vec/0 fields below were omitted by request or genuinely empty.
+    pub section: String,
     // Usage
     pub total_sessions: i64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
-    // Productivity
+    pub total_cache_creation_tokens: i64,
+    pub avg_input_per_session: i64,
+    pub avg_output_per_session: i64,
+    // Productivity (empty when section="tokens")
     pub tool_call_breakdown: Vec<ToolBreakdownEntry>,
     pub top_read_files: Vec<FileStatsEntry>,
     pub top_written_files: Vec<FileStatsEntry>,
@@ -313,13 +304,27 @@ pub struct AnalyticsReport {
     pub total_file_reads: i64,
     pub repeated_reads_detected: i64,
     pub estimated_tokens_saveable: i64,
-    // Memory health
+    // Overhead
+    pub overhead_tokens: i64,
+    pub overhead_by_hook: Vec<HookOverheadEntry>,
+    pub net_savings_tokens: i64,
+    // Top consumers
+    pub top_sessions_by_tokens: Vec<TokenSessionEntry>,
+    // Memory health (empty when section="tokens")
     pub context_items_by_category: Vec<CategoryCount>,
     pub total_do_not_repeat_rules: i64,
     pub total_bugs_logged: i64,
     pub oldest_context_item: Option<String>,
     pub projects_with_context: Vec<String>,
     pub projects_without_context: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TokenSessionEntry {
+    pub session_id: String,
+    pub project: Option<String>,
+    pub total_tokens: i64,
+    pub start_time: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

@@ -95,16 +95,27 @@ fn main() {
         Err(_) => std::process::exit(0),
     };
 
-    let result = match cli.command {
-        Command::PreRead => pre_read::run(&conn, &hook_input),
-        Command::PostRead => post_read::run(&conn, &hook_input),
-        Command::PreWrite => pre_write::run(&conn, &hook_input),
-        Command::PostWrite => post_write::run(&conn, &hook_input),
-        Command::SessionStart => session_start::run(&conn, &hook_input),
+    let (hook_name, result) = match cli.command {
+        Command::PreRead => ("pre_read", pre_read::run(&conn, &hook_input)),
+        Command::PostRead => ("post_read", post_read::run(&conn, &hook_input)),
+        Command::PreWrite => ("pre_write", pre_write::run(&conn, &hook_input)),
+        Command::PostWrite => ("post_write", post_write::run(&conn, &hook_input)),
+        Command::SessionStart => ("session_start", session_start::run(&conn, &hook_input)),
     };
 
-    if let Err(e) = result {
-        eprintln!("mnemosyne: hook error: {e}");
+    match result {
+        Ok(bytes) => {
+            let _ = db::record_overhead(
+                &conn,
+                hook_input.session_id.as_deref(),
+                hook_input.project().as_deref(),
+                hook_name,
+                bytes,
+            );
+        }
+        Err(e) => {
+            eprintln!("mnemosyne: hook error: {e}");
+        }
     }
 
     // Always exit 0 — hooks are advisory only

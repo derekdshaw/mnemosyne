@@ -170,6 +170,22 @@ pub const CREATE_DO_NOT_REPEAT_INDEX: &str = "\
     CREATE INDEX IF NOT EXISTS idx_do_not_repeat_project ON do_not_repeat(project);\
 ";
 
+pub const CREATE_MNEMOSYNE_OVERHEAD: &str = "\
+    CREATE TABLE IF NOT EXISTS mnemosyne_overhead (\
+        id INTEGER PRIMARY KEY AUTOINCREMENT,\
+        session_id TEXT,\
+        project TEXT,\
+        hook_name TEXT NOT NULL,\
+        output_bytes INTEGER NOT NULL,\
+        estimated_tokens INTEGER NOT NULL,\
+        emitted_at TEXT NOT NULL\
+    );\
+";
+
+pub const CREATE_MNEMOSYNE_OVERHEAD_INDEX: &str = "\
+    CREATE INDEX IF NOT EXISTS idx_overhead_session ON mnemosyne_overhead(session_id);\
+";
+
 /// All migration statements in order.
 pub const ALL_MIGRATIONS: &[&str] = &[
     CREATE_INGESTION_LOG,
@@ -185,6 +201,8 @@ pub const ALL_MIGRATIONS: &[&str] = &[
     CREATE_SESSION_READS_INDEX,
     CREATE_DO_NOT_REPEAT,
     CREATE_DO_NOT_REPEAT_INDEX,
+    CREATE_MNEMOSYNE_OVERHEAD,
+    CREATE_MNEMOSYNE_OVERHEAD_INDEX,
 ];
 
 /// FTS tables must be created separately (they fail if re-created when they already exist

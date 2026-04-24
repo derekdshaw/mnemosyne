@@ -13,15 +13,16 @@ main.rs
 ├── CLI parsing (clap subcommands)
 ├── Reads hook JSON from stdin
 ├── Opens SQLite DB (shared with MCP server and ingester)
-├── Dispatches to subcommand handler
+├── Dispatches to subcommand handler → Result<usize> (bytes emitted to Claude)
 ├── Writes briefing to stdout (session-start, injected into conversation)
-└── Writes warnings to stderr (pre/post hooks, visible to Claude)
+├── Writes warnings to stderr (pre/post hooks, visible to Claude)
+└── Records byte count to `mnemosyne_overhead` via memory_common::db::record_overhead
 
-session_start.rs — Print project briefing (do-not-repeat rules, context, bugs) to stdout
-pre_read.rs      — Anatomy lookup + repeated-read detection
-post_read.rs     — Record read in session_reads, update/create anatomy entry
-pre_write.rs     — Query bugs + do-not-repeat rules for the target file
-post_write.rs    — Update anatomy write count and modification time
+session_start.rs — Print project briefing (do-not-repeat rules, context, bugs) to stdout; returns byte count
+pre_read.rs      — Anatomy lookup + repeated-read detection; returns byte count
+post_read.rs     — Record read in session_reads, update/create anatomy entry; returns 0 (no user-visible output)
+pre_write.rs     — Query bugs + do-not-repeat rules for the target file; returns byte count
+post_write.rs    — Update anatomy write count and modification time; returns 0
 ```
 
 ### Hook Input Format
@@ -81,6 +82,12 @@ Supported languages for anatomy extraction: Rust, Python, TypeScript/JavaScript,
 **`post-write`** — Runs after every file write/edit:
 1. Increments `file_anatomy.times_written` and updates `last_modified`
 2. Creates anatomy entry if file is new
+
+### Overhead Tracking
+
+Each hook subcommand builds its stdout/stderr content into a `String` buffer and returns the final byte count to `main.rs`. After printing the buffer, main calls `memory_common::db::record_overhead(conn, session_id, project, hook_name, bytes)`, which writes one row to the `mnemosyne_overhead` table. Zero-byte invocations (e.g., a `pre_read` on an uncached file with no prior read) are a no-op — no row is inserted.
+
+The `get_analytics` MCP tool rolls these rows up into `overhead_tokens` (total) and `overhead_by_hook` (per-hook count, sum, avg, min, max, stddev) so you can compare mnemosyne's additive cost against its savings from repeated-read suppression. Token estimate uses the same `bytes / 3.5` heuristic as `post_read`'s file-content sizing, so overhead and saveable tokens are directly comparable.
 
 ### Error Handling
 

@@ -4,6 +4,7 @@
 use anyhow::Result;
 use memory_common::db;
 use rusqlite::Connection;
+use std::fmt::Write as _;
 
 use crate::HookInput;
 
@@ -16,7 +17,7 @@ type Bug = (
     Option<String>,
 );
 
-pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
+pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
     let project = input.project();
 
     // Build project filter params — empty string means "no filter" for Param-style queries,
@@ -88,62 +89,68 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
 
     // Only print if there's something to show
     if rules.is_empty() && context_items.is_empty() && bugs.is_empty() && total_sessions == 0 {
-        return Ok(());
+        return Ok(0);
     }
 
+    let mut buf = String::new();
     let proj_label = project_ref.unwrap_or("all projects");
-    println!("--- Mnemosyne Session Briefing ({proj_label}) ---");
+    writeln!(buf, "--- Mnemosyne Session Briefing ({proj_label}) ---")?;
 
     if !rules.is_empty() {
-        println!("\n## Do-Not-Repeat Rules");
+        writeln!(buf, "\n## Do-Not-Repeat Rules")?;
         for (rule, reason, file_path, proj) in &rules {
             let scope = format_scope(proj.as_deref(), file_path.as_deref());
-            print!("- {rule}");
+            write!(buf, "- {rule}")?;
             if let Some(r) = reason {
-                print!(" — Why: {r}");
+                write!(buf, " — Why: {r}")?;
             }
             if !scope.is_empty() {
-                print!(" [{scope}]");
+                write!(buf, " [{scope}]")?;
             }
-            println!();
+            writeln!(buf)?;
         }
     }
 
     if !context_items.is_empty() {
-        println!("\n## Saved Context");
+        writeln!(buf, "\n## Saved Context")?;
         let mut current_category = String::new();
         for (category, content, proj) in &context_items {
             if *category != current_category {
-                println!("### {category}");
+                writeln!(buf, "### {category}")?;
                 current_category.clone_from(category);
             }
             let scope = if proj.is_none() { " [global]" } else { "" };
             let content_short = db::truncate_utf8(content, 200);
-            println!("- {content_short}{scope}");
+            writeln!(buf, "- {content_short}{scope}")?;
         }
     }
 
     if !bugs.is_empty() {
-        println!("\n## Recent Bugs");
+        writeln!(buf, "\n## Recent Bugs")?;
         for (error_msg, root_cause, fix_desc, file_path, _proj) in &bugs {
             let error_short = db::truncate_utf8(error_msg, 100);
             let fix_short = db::truncate_utf8(fix_desc, 100);
-            print!("- {error_short} → Fix: {fix_short}");
+            write!(buf, "- {error_short} → Fix: {fix_short}")?;
             if let Some(rc) = root_cause {
                 let rc_short = db::truncate_utf8(rc, 80);
-                print!(" (cause: {rc_short})");
+                write!(buf, " (cause: {rc_short})")?;
             }
             if let Some(fp) = file_path {
-                print!(" [{fp}]");
+                write!(buf, " [{fp}]")?;
             }
-            println!();
+            writeln!(buf)?;
         }
     }
 
-    println!("\n## Stats: {total_sessions} sessions, {total_input} input tokens, {total_output} output tokens");
-    println!("---");
+    writeln!(
+        buf,
+        "\n## Stats: {total_sessions} sessions, {total_input} input tokens, {total_output} output tokens"
+    )?;
+    writeln!(buf, "---")?;
 
-    Ok(())
+    let bytes = buf.len();
+    print!("{buf}");
+    Ok(bytes)
 }
 
 fn format_scope(project: Option<&str>, file_path: Option<&str>) -> String {
@@ -172,8 +179,9 @@ mod tests {
     #[test]
     fn test_session_start_empty_db() {
         let conn = memory_common::db::open_db_in_memory().unwrap();
-        // No data — should succeed silently
-        assert!(run(&conn, &make_input("/Users/me/r/myproject")).is_ok());
+        // No data — should succeed silently and contribute zero overhead
+        let bytes = run(&conn, &make_input("/Users/me/r/myproject")).unwrap();
+        assert_eq!(bytes, 0, "empty DB should emit no briefing");
     }
 
     #[test]
@@ -186,7 +194,23 @@ mod tests {
         )
         .unwrap();
         // Global rule should appear for any project
-        assert!(run(&conn, &make_input("/Users/me/r/myproject")).is_ok());
+        let _ = run(&conn, &make_input("/Users/me/r/myproject")).unwrap();
+    }
+
+    #[test]
+    fn test_session_start_returns_byte_count_matching_output_length() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO do_not_repeat (project, rule, reason, created_at) \
+             VALUES (NULL, 'do not panic', 'because reasons', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let bytes = run(&conn, &make_input("/Users/me/r/myproject")).unwrap();
+        assert!(bytes > 0, "briefing with data should have non-zero bytes");
+        // The briefing always ends with "---\n"; this guards against returning
+        // a count that doesn't include the trailing newline.
+        assert!(bytes > b"--- Mnemosyne Session Briefing (myproject) ---\n".len());
     }
 
     #[test]
@@ -220,6 +244,6 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(run(&conn, &make_input("/Users/me/r/myproject")).is_ok());
+        let _ = run(&conn, &make_input("/Users/me/r/myproject")).unwrap();
     }
 }

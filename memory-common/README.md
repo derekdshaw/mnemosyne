@@ -7,9 +7,10 @@ Shared library crate for the Mnemosyne workspace. Provides the SQLite schema, JS
 This crate is the foundation layer. It owns:
 
 - **Database setup** — Opening the SQLite database, configuring WAL mode and PRAGMAs, running schema migrations
-- **Schema definitions** — All 12 tables and 3 FTS5 virtual tables as SQL constants
+- **Schema definitions** — All 13 tables and 3 FTS5 virtual tables as SQL constants
 - **JSONL parser** — Streaming parser for Claude Code's transcript format (`~/.claude/projects/*/*.jsonl`)
 - **File anatomy extraction** — Extracts content-aware descriptions from source files (doc comments, public signatures, exports) for 9 languages
+- **Overhead tracking** — `record_overhead()` helper that logs per-hook stdout/stderr byte counts to `mnemosyne_overhead` so `get_analytics` can report how many tokens mnemosyne's own hooks contributed to Claude's context
 - **Data models** — Rust structs for all database entities
 - **Path utilities** — Normalizing file paths to forward slashes for consistent cross-platform storage, deriving project names from working directories
 
@@ -19,7 +20,7 @@ This crate is the foundation layer. It owns:
 lib.rs
 ├── anatomy.rs   — extract_description(): content-aware file summaries for 9 languages
 ├── compress.rs  — Caveman compression: LLM-based text compression via `claude --print`, validation, batch support
-├── db.rs        — open_db(), run_migrations(), normalize_path(), project_from_cwd(), truncate_utf8()
+├── db.rs        — open_db(), run_migrations(), normalize_path(), project_from_cwd(), truncate_utf8(), record_overhead()
 ├── schema.rs    — SQL DDL constants (CREATE TABLE, CREATE INDEX, FTS5)
 ├── models.rs    — Serde-enabled structs: Session, Message, ToolCall, Bug, etc.
 └── jsonl.rs     — parse_line() → Record enum, extract_file_path(), extract_tool_input_summary()
@@ -55,7 +56,7 @@ cargo build -p memory-common
 cargo test -p memory-common
 ```
 
-49 tests covering database creation, migration idempotency, schema version skip, JSONL parsing (user messages, assistant messages, tool results, array content, missing usage, thinking block truncation, skip types, malformed lines), file path extraction, tool input summaries, path normalization, UTF-8 truncation (ASCII, emoji, CJK, empty, boundary), and anatomy extraction (Rust, Python, TypeScript, Java, Go, Markdown, TOML, empty, fallback).
+66 tests covering database creation, migration idempotency, schema version skip, overhead tracking (basic insert, zero-byte no-op, null session/project), JSONL parsing (user messages, assistant messages, tool results, array content, missing usage, thinking block truncation, skip types, malformed lines), file path extraction, tool input summaries, path normalization, UTF-8 truncation (ASCII, emoji, CJK, empty, boundary), and anatomy extraction (Rust, Python, TypeScript, Java, Go, Markdown, TOML, empty, fallback).
 
 ## Database Schema
 
@@ -78,3 +79,4 @@ SQLite database is stored at `~/.claude/memory/memory.db` with WAL mode enabled 
 **Hook tables** (populated by real-time hooks):
 - `file_anatomy` — Per-project file index with content-aware descriptions (doc comments, public signatures, exports), token estimates, and read/write counts
 - `session_reads` — Files read in the current session (for repeated-read detection)
+- `mnemosyne_overhead` — Per-hook overhead log: each row records a hook invocation's output size in bytes and estimated tokens (bytes/3.5). `get_analytics` rolls this up into `overhead_tokens` + `overhead_by_hook` so you can compare mnemosyne's cost against its savings. Zero-output hook runs are never inserted.

@@ -96,7 +96,7 @@ const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1800;
 /// heterogeneous parameter list. Rather than boxing each parameter on the heap,
 /// this enum wraps the three types we actually use — the match dispatches
 /// statically, and `Vec<Param>` is a single contiguous allocation.
-#[allow(dead_code)] // Int reserved for future queries (e.g., get_token_stats)
+#[allow(dead_code)] // Int reserved for future queries (e.g., analytics drill-downs)
 enum Param {
     Text(String),
     Int(i64),
@@ -865,12 +865,16 @@ impl MnemosyneServer {
         .await
     }
 
-    /// Get token usage statistics with savings estimates.
-    #[tool(name = "get_token_stats")]
-    async fn get_token_stats(
+    /// Comprehensive analytics report: usage + tokens + savings + overhead +
+    /// optionally productivity + memory health. Pass `section: "tokens"` to
+    /// skip the productivity and memory-health queries for a cheaper response
+    /// when you only care about token accounting; anything else (including
+    /// omitted) returns the full report.
+    #[tool(name = "get_analytics")]
+    async fn get_analytics(
         &self,
-        Parameters(input): Parameters<GetTokenStatsInput>,
-    ) -> Result<Json<TokenStatsReport>, rmcp::ErrorData> {
+        Parameters(input): Parameters<GetAnalyticsInput>,
+    ) -> Result<Json<AnalyticsReport>, rmcp::ErrorData> {
         self.run_db(move |conn| {
             let days = clamp_days(input.days.or(Some(30)));
             let project = input.project.clone().unwrap_or_default();
@@ -878,8 +882,10 @@ impl MnemosyneServer {
                 Param::Text(format!("-{days} days")),
                 Param::Text(project.clone()),
             ];
+            let section = input.section.as_deref().unwrap_or("full").to_string();
+            let tokens_only = section == "tokens";
 
-            // Session + token aggregates
+            // --- Usage (always computed) ---
             let (total_sessions, total_input, total_output): (i64, i64, i64) = conn.query_row(
                 "SELECT COUNT(*), COALESCE(SUM(total_input_tokens), 0), COALESCE(SUM(total_output_tokens), 0) \
                  FROM sessions WHERE start_time >= datetime('now', ?1) AND (?2 = '' OR project = ?2)",
@@ -887,7 +893,6 @@ impl MnemosyneServer {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-            // Cache tokens
             let (cache_read, cache_creation): (i64, i64) = conn.query_row(
                 "SELECT COALESCE(SUM(tu.cache_read_tokens), 0), COALESCE(SUM(tu.cache_creation_tokens), 0) \
                  FROM token_usage tu JOIN sessions s ON tu.session_id = s.session_id \
@@ -896,18 +901,102 @@ impl MnemosyneServer {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-            let avg_input = if total_sessions > 0 {
-                total_input / total_sessions
-            } else {
-                0
-            };
-            let avg_output = if total_sessions > 0 {
-                total_output / total_sessions
-            } else {
-                0
-            };
+            let avg_input = if total_sessions > 0 { total_input / total_sessions } else { 0 };
+            let avg_output = if total_sessions > 0 { total_output / total_sessions } else { 0 };
 
-            // Files with anatomy
+            // --- Productivity (skipped when section="tokens") ---
+            let (tool_call_breakdown, top_read_files, top_written_files, bug_count, bugs_by_file) =
+                if tokens_only {
+                    (Vec::new(), Vec::new(), Vec::new(), 0, Vec::new())
+                } else {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT tc.tool_name, COUNT(*) as cnt FROM tool_calls tc \
+                         JOIN sessions s ON tc.session_id = s.session_id \
+                         WHERE s.start_time >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2) \
+                         GROUP BY tc.tool_name ORDER BY cnt DESC",
+                        )
+                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    let tool_call_breakdown: Vec<ToolBreakdownEntry> = stmt
+                        .query_map(rusqlite::params_from_iter(&params), |row| {
+                            Ok(ToolBreakdownEntry {
+                                tool_name: row.get(0)?,
+                                count: row.get(1)?,
+                            })
+                        })
+                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                        .filter_map(|r| r.ok())
+                        .collect();
+
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT file_path, times_read, estimated_tokens FROM file_anatomy \
+                         WHERE (?1 = '' OR project = ?1) ORDER BY times_read DESC LIMIT 10",
+                        )
+                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    let top_read_files: Vec<FileStatsEntry> = stmt
+                        .query_map([&Param::Text(project.clone())], |row| {
+                            Ok(FileStatsEntry {
+                                file_path: row.get(0)?,
+                                count: row.get(1)?,
+                                estimated_tokens: row.get(2)?,
+                            })
+                        })
+                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                        .filter_map(|r| r.ok())
+                        .collect();
+
+                    let mut stmt = conn.prepare(
+                        "SELECT file_path, times_written, estimated_tokens FROM file_anatomy \
+                         WHERE (?1 = '' OR project = ?1) AND times_written > 0 ORDER BY times_written DESC LIMIT 10"
+                    ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    let top_written_files: Vec<FileStatsEntry> = stmt
+                        .query_map([&Param::Text(project.clone())], |row| {
+                            Ok(FileStatsEntry {
+                                file_path: row.get(0)?,
+                                count: row.get(1)?,
+                                estimated_tokens: row.get(2)?,
+                            })
+                        })
+                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                        .filter_map(|r| r.ok())
+                        .collect();
+
+                    let bug_count: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM bugs WHERE created_at >= datetime('now', ?1) AND (?2 = '' OR project = ?2)",
+                        rusqlite::params_from_iter(&params),
+                        |row| row.get(0),
+                    ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT file_path, COUNT(*) as cnt FROM bugs \
+                         WHERE file_path IS NOT NULL AND (?1 = '' OR project = ?1) \
+                         GROUP BY file_path ORDER BY cnt DESC LIMIT 5",
+                        )
+                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    let bugs_by_file: Vec<FileBugCount> = stmt
+                        .query_map([&Param::Text(project.clone())], |row| {
+                            Ok(FileBugCount {
+                                file_path: row.get(0)?,
+                                bug_count: row.get(1)?,
+                            })
+                        })
+                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                        .filter_map(|r| r.ok())
+                        .collect();
+
+                    (
+                        tool_call_breakdown,
+                        top_read_files,
+                        top_written_files,
+                        bug_count,
+                        bugs_by_file,
+                    )
+                };
+
+            // --- Savings + Overhead (always computed) ---
+            // Anatomy count is cheap and always useful for interpreting savings.
             let files_with_anatomy: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM file_anatomy WHERE (?1 = '' OR project = ?1)",
@@ -916,31 +1005,88 @@ impl MnemosyneServer {
                 )
                 .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-            // Total file reads and repeated reads
             let total_file_reads: i64 = conn
-                .query_row("SELECT COUNT(*) FROM session_reads", [], |row| row.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM session_reads sr \
+                 JOIN sessions s ON sr.session_id = s.session_id \
+                 WHERE sr.read_at >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2)",
+                    rusqlite::params_from_iter(&params),
+                    |row| row.get(0),
+                )
                 .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
             let repeated_reads: i64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM (SELECT session_id, file_path FROM session_reads \
-                 GROUP BY session_id, file_path HAVING COUNT(*) > 1)",
-                    [],
+                    "SELECT COUNT(*) FROM ( \
+                       SELECT sr.session_id, sr.file_path FROM session_reads sr \
+                       JOIN sessions s ON sr.session_id = s.session_id \
+                       WHERE sr.read_at >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2) \
+                       GROUP BY sr.session_id, sr.file_path HAVING COUNT(*) > 1 \
+                     )",
+                    rusqlite::params_from_iter(&params),
                     |row| row.get(0),
                 )
                 .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-            // Estimated saveable tokens: sum of token_estimate for non-first reads per (session, file)
+            // MIN(id) subquery stays global so a re-read inside the window still
+            // counts as saveable when its first read happened outside the window.
             let saveable: i64 = conn
                 .query_row(
-                    "SELECT COALESCE(SUM(token_estimate), 0) FROM session_reads \
-                 WHERE id NOT IN (SELECT MIN(id) FROM session_reads GROUP BY session_id, file_path)",
-                    [],
+                    "SELECT COALESCE(SUM(sr.token_estimate), 0) FROM session_reads sr \
+                 JOIN sessions s ON sr.session_id = s.session_id \
+                 WHERE sr.read_at >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2) \
+                   AND sr.id NOT IN (SELECT MIN(id) FROM session_reads GROUP BY session_id, file_path)",
+                    rusqlite::params_from_iter(&params),
                     |row| row.get(0),
                 )
                 .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-            // Top 5 sessions by total tokens
+            let overhead_tokens: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(estimated_tokens), 0) FROM mnemosyne_overhead \
+                 WHERE emitted_at >= datetime('now', ?1) AND (?2 = '' OR project = ?2)",
+                    rusqlite::params_from_iter(&params),
+                    |row| row.get(0),
+                )
+                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+            // Overhead breakdown by hook — distribution stats let callers spot
+            // outliers (a heavy briefing project runs avg well above the mean).
+            let mut stmt = conn
+                .prepare(
+                    "SELECT hook_name, COUNT(*), \
+                        COALESCE(SUM(estimated_tokens), 0), \
+                        COALESCE(AVG(estimated_tokens), 0.0), \
+                        COALESCE(MIN(estimated_tokens), 0), \
+                        COALESCE(MAX(estimated_tokens), 0), \
+                        COALESCE(AVG(estimated_tokens * estimated_tokens), 0.0) \
+                 FROM mnemosyne_overhead \
+                 WHERE emitted_at >= datetime('now', ?1) AND (?2 = '' OR project = ?2) \
+                 GROUP BY hook_name ORDER BY SUM(estimated_tokens) DESC",
+                )
+                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let overhead_by_hook: Vec<HookOverheadEntry> = stmt
+                .query_map(rusqlite::params_from_iter(&params), |row| {
+                    let avg: f64 = row.get(3)?;
+                    let avg_sq: f64 = row.get(6)?;
+                    // Population variance = E[X^2] - E[X]^2. Clamp at 0 to guard
+                    // against tiny negative values from float drift.
+                    let variance = (avg_sq - avg * avg).max(0.0);
+                    Ok(HookOverheadEntry {
+                        hook_name: row.get(0)?,
+                        invocations: row.get(1)?,
+                        estimated_tokens: row.get(2)?,
+                        avg_tokens: avg,
+                        min_tokens: row.get(4)?,
+                        max_tokens: row.get(5)?,
+                        stddev_tokens: variance.sqrt(),
+                    })
+                })
+                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            // Top 5 sessions by total tokens (always useful alongside token stats)
             let mut stmt = conn.prepare(
                 "SELECT session_id, project, (total_input_tokens + total_output_tokens) as total, start_time \
                  FROM sessions WHERE start_time >= datetime('now', ?1) AND (?2 = '' OR project = ?2) \
@@ -959,9 +1105,93 @@ impl MnemosyneServer {
                 .filter_map(|r| r.ok())
                 .collect();
 
-            Ok(Json(TokenStatsReport {
+            // --- Memory Health (skipped when section="tokens") ---
+            let (
+                context_items_by_category,
+                total_dnr,
+                total_bugs,
+                oldest_context,
+                projects_with,
+                projects_without,
+            ) = if tokens_only {
+                (Vec::new(), 0, 0, None, Vec::new(), Vec::new())
+            } else {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT category, COUNT(*) FROM context_items \
+                     WHERE (?1 = '' OR project = ?1) GROUP BY category ORDER BY COUNT(*) DESC",
+                    )
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                let context_items_by_category: Vec<CategoryCount> = stmt
+                    .query_map([&Param::Text(project.clone())], |row| {
+                        Ok(CategoryCount {
+                            category: row.get(0)?,
+                            count: row.get(1)?,
+                        })
+                    })
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                let total_dnr: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM do_not_repeat WHERE (?1 = '' OR project = ?1)",
+                        [&Param::Text(project.clone())],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+                let total_bugs: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM bugs WHERE (?1 = '' OR project = ?1)",
+                        [&Param::Text(project.clone())],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+                let oldest_context: Option<String> = conn
+                    .query_row(
+                        "SELECT MIN(created_at) FROM context_items WHERE (?1 = '' OR project = ?1)",
+                        [&Param::Text(project.clone())],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT DISTINCT project FROM context_items WHERE project IS NOT NULL",
+                    )
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                let projects_with: Vec<String> = stmt
+                    .query_map([], |row| row.get(0))
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL \
+                     AND project NOT IN (SELECT DISTINCT project FROM context_items WHERE project IS NOT NULL)"
+                ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                let projects_without: Vec<String> = stmt
+                    .query_map([], |row| row.get(0))
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                (
+                    context_items_by_category,
+                    total_dnr,
+                    total_bugs,
+                    oldest_context,
+                    projects_with,
+                    projects_without,
+                )
+            };
+
+            Ok(Json(AnalyticsReport {
                 period_days: days,
                 project: input.project,
+                section,
                 total_sessions,
                 total_input_tokens: total_input,
                 total_output_tokens: total_output,
@@ -969,230 +1199,6 @@ impl MnemosyneServer {
                 total_cache_creation_tokens: cache_creation,
                 avg_input_per_session: avg_input,
                 avg_output_per_session: avg_output,
-                files_with_anatomy,
-                total_file_reads,
-                repeated_reads_warned: repeated_reads,
-                estimated_tokens_saveable: saveable,
-                top_sessions_by_tokens: top_sessions,
-            }))
-        })
-        .await
-    }
-
-    /// Get a comprehensive analytics report: usage, productivity, savings, and memory health.
-    #[tool(name = "get_analytics")]
-    async fn get_analytics(
-        &self,
-        Parameters(input): Parameters<GetAnalyticsInput>,
-    ) -> Result<Json<AnalyticsReport>, rmcp::ErrorData> {
-        self.run_db(move |conn| {
-            let days = clamp_days(input.days.or(Some(30)));
-            let project = input.project.clone().unwrap_or_default();
-            let params = [
-                Param::Text(format!("-{days} days")),
-                Param::Text(project.clone()),
-            ];
-
-            // --- Usage ---
-            let (total_sessions, total_input, total_output): (i64, i64, i64) = conn.query_row(
-                "SELECT COUNT(*), COALESCE(SUM(total_input_tokens), 0), COALESCE(SUM(total_output_tokens), 0) \
-                 FROM sessions WHERE start_time >= datetime('now', ?1) AND (?2 = '' OR project = ?2)",
-                rusqlite::params_from_iter(&params),
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
-            let cache_read: i64 = conn
-                .query_row(
-                    "SELECT COALESCE(SUM(tu.cache_read_tokens), 0) \
-                 FROM token_usage tu JOIN sessions s ON tu.session_id = s.session_id \
-                 WHERE s.start_time >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2)",
-                    rusqlite::params_from_iter(&params),
-                    |row| row.get(0),
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
-            // --- Productivity ---
-            let mut stmt = conn
-                .prepare(
-                    "SELECT tc.tool_name, COUNT(*) as cnt FROM tool_calls tc \
-                 JOIN sessions s ON tc.session_id = s.session_id \
-                 WHERE s.start_time >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2) \
-                 GROUP BY tc.tool_name ORDER BY cnt DESC",
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-            let tool_call_breakdown: Vec<ToolBreakdownEntry> = stmt
-                .query_map(rusqlite::params_from_iter(&params), |row| {
-                    Ok(ToolBreakdownEntry {
-                        tool_name: row.get(0)?,
-                        count: row.get(1)?,
-                    })
-                })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            // Top read files
-            let mut stmt = conn
-                .prepare(
-                    "SELECT file_path, times_read, estimated_tokens FROM file_anatomy \
-                 WHERE (?1 = '' OR project = ?1) ORDER BY times_read DESC LIMIT 10",
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-            let top_read_files: Vec<FileStatsEntry> = stmt
-                .query_map([&Param::Text(project.clone())], |row| {
-                    Ok(FileStatsEntry {
-                        file_path: row.get(0)?,
-                        count: row.get(1)?,
-                        estimated_tokens: row.get(2)?,
-                    })
-                })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            // Top written files
-            let mut stmt = conn.prepare(
-                "SELECT file_path, times_written, estimated_tokens FROM file_anatomy \
-                 WHERE (?1 = '' OR project = ?1) AND times_written > 0 ORDER BY times_written DESC LIMIT 10"
-            ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-            let top_written_files: Vec<FileStatsEntry> = stmt
-                .query_map([&Param::Text(project.clone())], |row| {
-                    Ok(FileStatsEntry {
-                        file_path: row.get(0)?,
-                        count: row.get(1)?,
-                        estimated_tokens: row.get(2)?,
-                    })
-                })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            // Bug count in period
-            let bug_count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM bugs WHERE created_at >= datetime('now', ?1) AND (?2 = '' OR project = ?2)",
-                rusqlite::params_from_iter(&params),
-                |row| row.get(0),
-            ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
-            // Bugs by file (top 5)
-            let mut stmt = conn
-                .prepare(
-                    "SELECT file_path, COUNT(*) as cnt FROM bugs \
-                 WHERE file_path IS NOT NULL AND (?1 = '' OR project = ?1) \
-                 GROUP BY file_path ORDER BY cnt DESC LIMIT 5",
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-            let bugs_by_file: Vec<FileBugCount> = stmt
-                .query_map([&Param::Text(project.clone())], |row| {
-                    Ok(FileBugCount {
-                        file_path: row.get(0)?,
-                        bug_count: row.get(1)?,
-                    })
-                })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            // --- Savings ---
-            let files_with_anatomy: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM file_anatomy WHERE (?1 = '' OR project = ?1)",
-                    [&Param::Text(project.clone())],
-                    |row| row.get(0),
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
-            let total_file_reads: i64 = conn
-                .query_row("SELECT COUNT(*) FROM session_reads", [], |row| row.get(0))
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
-            let repeated_reads: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM (SELECT session_id, file_path FROM session_reads \
-                 GROUP BY session_id, file_path HAVING COUNT(*) > 1)",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
-            let saveable: i64 = conn
-                .query_row(
-                    "SELECT COALESCE(SUM(token_estimate), 0) FROM session_reads \
-                 WHERE id NOT IN (SELECT MIN(id) FROM session_reads GROUP BY session_id, file_path)",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
-            // --- Memory Health ---
-            let mut stmt = conn
-                .prepare(
-                    "SELECT category, COUNT(*) FROM context_items \
-                 WHERE (?1 = '' OR project = ?1) GROUP BY category ORDER BY COUNT(*) DESC",
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-            let context_items_by_category: Vec<CategoryCount> = stmt
-                .query_map([&Param::Text(project.clone())], |row| {
-                    Ok(CategoryCount {
-                        category: row.get(0)?,
-                        count: row.get(1)?,
-                    })
-                })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            let total_dnr: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM do_not_repeat WHERE (?1 = '' OR project = ?1)",
-                    [&Param::Text(project.clone())],
-                    |row| row.get(0),
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
-            let total_bugs: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM bugs WHERE (?1 = '' OR project = ?1)",
-                    [&Param::Text(project.clone())],
-                    |row| row.get(0),
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
-            let oldest_context: Option<String> = conn
-                .query_row(
-                    "SELECT MIN(created_at) FROM context_items WHERE (?1 = '' OR project = ?1)",
-                    [&Param::Text(project.clone())],
-                    |row| row.get(0),
-                )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-
-            // Projects with context vs without
-            let mut stmt = conn
-                .prepare("SELECT DISTINCT project FROM context_items WHERE project IS NOT NULL")
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-            let projects_with: Vec<String> = stmt
-                .query_map([], |row| row.get(0))
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL \
-                 AND project NOT IN (SELECT DISTINCT project FROM context_items WHERE project IS NOT NULL)"
-            ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-            let projects_without: Vec<String> = stmt
-                .query_map([], |row| row.get(0))
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            Ok(Json(AnalyticsReport {
-                period_days: days,
-                project: input.project,
-                total_sessions,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                total_cache_read_tokens: cache_read,
                 tool_call_breakdown,
                 top_read_files,
                 top_written_files,
@@ -1202,6 +1208,10 @@ impl MnemosyneServer {
                 total_file_reads,
                 repeated_reads_detected: repeated_reads,
                 estimated_tokens_saveable: saveable,
+                overhead_tokens,
+                overhead_by_hook,
+                net_savings_tokens: saveable - overhead_tokens,
+                top_sessions_by_tokens: top_sessions,
                 context_items_by_category,
                 total_do_not_repeat_rules: total_dnr,
                 total_bugs_logged: total_bugs,
@@ -1781,23 +1791,28 @@ mod tests {
     // --- Analytics tool tests ---
 
     #[tokio::test]
-    async fn test_get_token_stats_empty() {
+    async fn test_get_analytics_tokens_section_empty() {
         let server = test_server();
         let Json(report) = server
-            .get_token_stats(Parameters(GetTokenStatsInput {
+            .get_analytics(Parameters(GetAnalyticsInput {
                 project: None,
                 days: Some(30),
+                section: Some("tokens".to_string()),
             }))
             .await
             .unwrap();
+        assert_eq!(report.section, "tokens");
         assert_eq!(report.total_sessions, 0);
         assert_eq!(report.total_input_tokens, 0);
         assert_eq!(report.total_output_tokens, 0);
         assert!(report.top_sessions_by_tokens.is_empty());
+        // tokens section skips productivity + memory health
+        assert!(report.tool_call_breakdown.is_empty());
+        assert!(report.context_items_by_category.is_empty());
     }
 
     #[tokio::test]
-    async fn test_get_token_stats_with_data() {
+    async fn test_get_analytics_tokens_section_with_data() {
         let server = test_server();
         {
             let conn = server.db.lock().unwrap();
@@ -1818,9 +1833,10 @@ mod tests {
             conn.execute("INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) VALUES ('ts1', 'src/main.rs', datetime('now'), 200)", []).unwrap();
         }
         let Json(report) = server
-            .get_token_stats(Parameters(GetTokenStatsInput {
+            .get_analytics(Parameters(GetAnalyticsInput {
                 project: Some("proj".to_string()),
                 days: Some(7),
+                section: Some("tokens".to_string()),
             }))
             .await
             .unwrap();
@@ -1828,13 +1844,18 @@ mod tests {
         assert_eq!(report.total_input_tokens, 5000);
         assert_eq!(report.total_output_tokens, 3000);
         assert_eq!(report.total_cache_read_tokens, 1000);
+        assert_eq!(report.total_cache_creation_tokens, 500);
         assert_eq!(report.avg_input_per_session, 5000);
+        assert_eq!(report.avg_output_per_session, 3000);
         assert_eq!(report.files_with_anatomy, 1);
         assert_eq!(report.total_file_reads, 2);
-        assert_eq!(report.repeated_reads_warned, 1);
+        assert_eq!(report.repeated_reads_detected, 1);
         assert_eq!(report.estimated_tokens_saveable, 200);
         assert_eq!(report.top_sessions_by_tokens.len(), 1);
         assert_eq!(report.top_sessions_by_tokens[0].total_tokens, 8000);
+        // tokens section still skips productivity + memory health
+        assert!(report.tool_call_breakdown.is_empty());
+        assert!(report.context_items_by_category.is_empty());
     }
 
     #[tokio::test]
@@ -1844,6 +1865,7 @@ mod tests {
             .get_analytics(Parameters(GetAnalyticsInput {
                 project: None,
                 days: Some(30),
+                section: None,
             }))
             .await
             .unwrap();
@@ -1909,6 +1931,7 @@ mod tests {
             .get_analytics(Parameters(GetAnalyticsInput {
                 project: None,
                 days: Some(30),
+                section: None,
             }))
             .await
             .unwrap();
@@ -1926,6 +1949,353 @@ mod tests {
         assert!(report
             .projects_without_context
             .contains(&"orphan".to_string()));
+    }
+
+    // --- Regression guards for the filter-bug fix on session_reads-derived metrics.
+    //     Before the fix, total_file_reads / repeated_reads_detected / estimated_tokens_saveable
+    //     all ignored the `days` and `project` inputs.
+
+    #[tokio::test]
+    async fn test_get_analytics_tokens_filter_excludes_reads_outside_window() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_id, project, start_time, message_count) \
+                 VALUES ('old', 'proj', datetime('now', '-60 days'), 0)",
+                [],
+            )
+            .unwrap();
+            // Two reads of the same file 60 days ago — a repeat pair, but outside any
+            // 7d/30d window. They must not count in any of the filtered metrics.
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('old', 'src/old.rs', datetime('now', '-60 days'), 500)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('old', 'src/old.rs', datetime('now', '-60 days'), 500)",
+                [],
+            )
+            .unwrap();
+        }
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: None,
+                days: Some(30),
+                section: Some("tokens".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(report.total_file_reads, 0, "60d-old reads leaked into 30d");
+        assert_eq!(report.repeated_reads_detected, 0);
+        assert_eq!(report.estimated_tokens_saveable, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_analytics_tokens_filter_respects_project() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            // Two sessions in-window, different projects. Each has a repeat pair.
+            for (sid, proj) in [("s_a", "alpha"), ("s_b", "beta")] {
+                conn.execute(
+                    "INSERT INTO sessions (session_id, project, start_time, message_count) \
+                     VALUES (?1, ?2, datetime('now'), 0)",
+                    rusqlite::params![sid, proj],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                     VALUES (?1, 'src/f.rs', datetime('now', '-2 minutes'), 300)",
+                    [sid],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                     VALUES (?1, 'src/f.rs', datetime('now'), 300)",
+                    [sid],
+                )
+                .unwrap();
+            }
+        }
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: Some("alpha".to_string()),
+                days: Some(7),
+                section: Some("tokens".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            report.total_file_reads, 2,
+            "beta's reads leaked through project filter"
+        );
+        assert_eq!(report.repeated_reads_detected, 1);
+        assert_eq!(report.estimated_tokens_saveable, 300);
+    }
+
+    #[tokio::test]
+    async fn test_get_analytics_includes_overhead_and_net_savings() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_id, project, start_time, message_count) \
+                 VALUES ('s1', 'proj', datetime('now'), 0)",
+                [],
+            )
+            .unwrap();
+            // Saveable: 400 tokens (second read of same file)
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('s1', 'a.rs', datetime('now', '-2 minutes'), 400)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('s1', 'a.rs', datetime('now'), 400)",
+                [],
+            )
+            .unwrap();
+            // Overhead: three hook invocations
+            conn.execute(
+                "INSERT INTO mnemosyne_overhead (session_id, project, hook_name, output_bytes, estimated_tokens, emitted_at) \
+                 VALUES ('s1', 'proj', 'session_start', 350, 100, datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO mnemosyne_overhead (session_id, project, hook_name, output_bytes, estimated_tokens, emitted_at) \
+                 VALUES ('s1', 'proj', 'pre_read', 70, 20, datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO mnemosyne_overhead (session_id, project, hook_name, output_bytes, estimated_tokens, emitted_at) \
+                 VALUES ('s1', 'proj', 'pre_read', 70, 20, datetime('now'))",
+                [],
+            ).unwrap();
+        }
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: Some("proj".to_string()),
+                days: Some(7),
+                section: Some("tokens".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(report.estimated_tokens_saveable, 400);
+        assert_eq!(report.overhead_tokens, 140);
+        assert_eq!(report.net_savings_tokens, 260, "net = saveable - overhead");
+
+        // Breakdown is sorted by SUM(estimated_tokens) DESC
+        assert_eq!(report.overhead_by_hook.len(), 2);
+        let ss = &report.overhead_by_hook[0];
+        assert_eq!(ss.hook_name, "session_start");
+        assert_eq!(ss.invocations, 1);
+        assert_eq!(ss.estimated_tokens, 100);
+        // Single invocation → avg=min=max=value, stddev=0
+        assert_eq!(ss.avg_tokens, 100.0);
+        assert_eq!(ss.min_tokens, 100);
+        assert_eq!(ss.max_tokens, 100);
+        assert_eq!(ss.stddev_tokens, 0.0);
+
+        let pr = &report.overhead_by_hook[1];
+        assert_eq!(pr.hook_name, "pre_read");
+        assert_eq!(pr.invocations, 2);
+        assert_eq!(pr.estimated_tokens, 40);
+        // Two identical values → stddev=0
+        assert_eq!(pr.avg_tokens, 20.0);
+        assert_eq!(pr.min_tokens, 20);
+        assert_eq!(pr.max_tokens, 20);
+        assert_eq!(pr.stddev_tokens, 0.0);
+    }
+
+    /// Three invocations with spread values → avg, min, max, and stddev all
+    /// take meaningful values. Lets a caller judge how much the average session
+    /// deviates from the typical briefing cost.
+    #[tokio::test]
+    async fn test_get_analytics_overhead_distribution_stats() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            for tokens in [10i64, 20, 30] {
+                conn.execute(
+                    "INSERT INTO mnemosyne_overhead (session_id, project, hook_name, output_bytes, estimated_tokens, emitted_at) \
+                     VALUES ('s1', 'proj', 'session_start', ?1, ?1, datetime('now'))",
+                    [tokens],
+                ).unwrap();
+            }
+        }
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: Some("proj".to_string()),
+                days: Some(7),
+                section: Some("tokens".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(report.overhead_by_hook.len(), 1);
+        let ss = &report.overhead_by_hook[0];
+        assert_eq!(ss.invocations, 3);
+        assert_eq!(ss.estimated_tokens, 60);
+        assert_eq!(ss.avg_tokens, 20.0);
+        assert_eq!(ss.min_tokens, 10);
+        assert_eq!(ss.max_tokens, 30);
+        // Population variance of {10,20,30} = ((10-20)^2 + 0 + (30-20)^2)/3 = 200/3
+        // stddev = sqrt(66.666...) ≈ 8.1650
+        let expected = (200.0_f64 / 3.0).sqrt();
+        assert!(
+            (ss.stddev_tokens - expected).abs() < 1e-9,
+            "stddev {} != expected {}",
+            ss.stddev_tokens,
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_analytics_excludes_overhead_outside_window() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO mnemosyne_overhead (session_id, project, hook_name, output_bytes, estimated_tokens, emitted_at) \
+                 VALUES ('s1', 'proj', 'session_start', 350, 100, datetime('now', '-60 days'))",
+                [],
+            ).unwrap();
+        }
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: None,
+                days: Some(30),
+                section: Some("tokens".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(report.overhead_tokens, 0);
+        assert!(report.overhead_by_hook.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_analytics_filter_excludes_reads_outside_window() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_id, project, start_time, message_count) \
+                 VALUES ('old', 'proj', datetime('now', '-60 days'), 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('old', 'src/old.rs', datetime('now', '-60 days'), 500)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('old', 'src/old.rs', datetime('now', '-60 days'), 500)",
+                [],
+            )
+            .unwrap();
+        }
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: None,
+                days: Some(30),
+                section: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(report.total_file_reads, 0);
+        assert_eq!(report.repeated_reads_detected, 0);
+        assert_eq!(report.estimated_tokens_saveable, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_analytics_filter_respects_project() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            for (sid, proj) in [("s_a", "alpha"), ("s_b", "beta")] {
+                conn.execute(
+                    "INSERT INTO sessions (session_id, project, start_time, message_count) \
+                     VALUES (?1, ?2, datetime('now'), 0)",
+                    rusqlite::params![sid, proj],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                     VALUES (?1, 'src/f.rs', datetime('now', '-2 minutes'), 300)",
+                    [sid],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                     VALUES (?1, 'src/f.rs', datetime('now'), 300)",
+                    [sid],
+                )
+                .unwrap();
+            }
+        }
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: Some("alpha".to_string()),
+                days: Some(7),
+                section: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(report.total_file_reads, 2);
+        assert_eq!(report.repeated_reads_detected, 1);
+        assert_eq!(report.estimated_tokens_saveable, 300);
+    }
+
+    /// Saveable counts a repeat even when the FIRST read is outside the window —
+    /// anatomy is still "saving" the in-window re-read. Guards against accidentally
+    /// filtering the MIN(id) subquery by date.
+    #[tokio::test]
+    async fn test_get_analytics_saveable_counts_repeat_when_first_read_predates_window() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_id, project, start_time, message_count) \
+                 VALUES ('s1', 'proj', datetime('now', '-60 days'), 0)",
+                [],
+            )
+            .unwrap();
+            // First read 60 days ago (outside any practical window), second today.
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('s1', 'src/f.rs', datetime('now', '-60 days'), 800)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('s1', 'src/f.rs', datetime('now'), 800)",
+                [],
+            )
+            .unwrap();
+        }
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: None,
+                days: Some(7),
+                section: Some("tokens".to_string()),
+            }))
+            .await
+            .unwrap();
+        // In-window reads = 1 (the re-read). Repeat pair count = 0 because only one
+        // row falls inside the window so the HAVING COUNT(*)>1 check doesn't trip.
+        // But saveable SHOULD count the in-window re-read (800) because MIN(id) is
+        // the first read, which happens to be outside the window.
+        assert_eq!(report.total_file_reads, 1);
+        assert_eq!(report.estimated_tokens_saveable, 800);
     }
 
     // --- Defensive shutdown / timeout tests ---

@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server that gives Claude Code queryable access to t
 
 ## Purpose
 
-This server runs over stdio and exposes 13 tools that Claude can call during a session to search past conversations, save project context, log bugs, manage do-not-repeat rules, and view analytics. It connects to the same SQLite database populated by `session-ingester` and `memory-hooks`.
+This server runs over stdio and exposes 12 tools that Claude can call during a session to search past conversations, save project context, log bugs, manage do-not-repeat rules, and view analytics. It connects to the same SQLite database populated by `session-ingester` and `memory-hooks`.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ main.rs
 ├── MnemosyneServer struct
 │   ├── Mutex<Connection>  — SQLite connection (thread-safe)
 │   └── ToolRouter<Self>   — rmcp tool dispatch
-├── #[tool_router] impl    — 13 tool methods with SQL queries
+├── #[tool_router] impl    — 12 tool methods with SQL queries
 ├── #[tool_handler] impl   — ServerHandler trait (initialize, list_tools, call_tool)
 └── main()                 — Opens DB, starts stdio transport via rmcp
 
@@ -49,8 +49,17 @@ tools.rs
 
 | Tool | Input | Description |
 |------|-------|-------------|
-| `get_token_stats` | project?, days? | Token usage, cache stats, savings estimates, top sessions |
-| `get_analytics` | project?, days? | Comprehensive report: usage, productivity, savings, memory health |
+| `get_analytics` | project?, days?, section? | Usage + tokens + savings + overhead (always), plus productivity and memory-health when `section` is `"full"` or omitted. Pass `section: "tokens"` for a cheaper tokens-only response. |
+
+The `get_analytics` response always includes:
+- **Usage:** `total_sessions`, `total_input_tokens`, `total_output_tokens`, `total_cache_read_tokens`, `total_cache_creation_tokens`, `avg_input_per_session`, `avg_output_per_session`
+- **Savings:** `files_with_anatomy`, `total_file_reads`, `repeated_reads_detected`, `estimated_tokens_saveable` — the "tokens we skipped re-reading because anatomy was cached"
+- **Overhead:** `overhead_tokens` (total tokens mnemosyne's own hooks added to Claude's context in the window), `overhead_by_hook` (per-hook breakdown with `invocations`, `estimated_tokens`, `avg_tokens`, `min_tokens`, `max_tokens`, `stddev_tokens`), and `net_savings_tokens = saveable - overhead`
+- **Top consumers:** `top_sessions_by_tokens` (5 biggest sessions by total tokens)
+
+When `section` is `"full"` (or omitted), the response additionally includes productivity data (`tool_call_breakdown`, `top_read_files`, `top_written_files`, `bug_count`, `bugs_by_file`) and memory health (`context_items_by_category`, `total_do_not_repeat_rules`, `total_bugs_logged`, `oldest_context_item`, `projects_with_context`, `projects_without_context`).
+
+Use `section: "tokens"` when you only need token accounting — it skips the heavier joins on `tool_calls`, `file_anatomy`, `bugs`, `context_items`, `do_not_repeat`.
 
 ### MCP Protocol
 
@@ -76,7 +85,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 ## Test
 
 ```bash
-cargo test -p memory-mcp-server   # 24 tests covering all 13 tools + helper functions
+cargo test -p memory-mcp-server   # 34 tests covering all 12 tools + helpers + regression guards
 ```
 
 ## Configuration

@@ -11,7 +11,7 @@ I had been thinking of writing something like this but reading an article about 
 ## What It Does
 
 - **Ingests session transcripts** — Parses Claude Code's JSONL transcript files into a structured SQLite database with full-text search
-- **Provides MCP tools** — 13 tools for searching past sessions, saving context, logging bugs, and managing do-not-repeat rules
+- **Provides MCP tools** — 12 tools for searching past sessions, saving context, logging bugs, managing do-not-repeat rules, and reporting analytics (including mnemosyne's own token overhead vs. savings)
 - **Real-time hooks** — Injects session briefing at startup, warns before re-reading files, and checks bugs/do-not-repeat rules before writes
 - **Cross-session knowledge** — Decisions, bugs, and context persist so Claude doesn't re-learn the same things every session
 
@@ -43,7 +43,7 @@ I had been thinking of writing something like this but reading an article about 
                                          ^
                               ┌──────────┴────────────┐
                               │  memory-mcp-server     │
-                              │  13 MCP tools over     │
+                              │  12 MCP tools over     │
                               │  stdio transport       │
                               └────────────────────────┘
 ```
@@ -54,7 +54,7 @@ I had been thinking of writing something like this but reading an article about 
 |-------|--------|---------|
 | [memory-common](memory-common/) | (library) | Shared SQLite schema, JSONL parser, data models, path utilities |
 | [session-ingester](session-ingester/) | `session-ingester` | CLI that scans and ingests JSONL transcripts into SQLite |
-| [memory-mcp-server](memory-mcp-server/) | `memory-mcp-server` | MCP server exposing 13 query/write tools over stdio |
+| [memory-mcp-server](memory-mcp-server/) | `memory-mcp-server` | MCP server exposing 12 query/write tools over stdio |
 | [memory-hooks](memory-hooks/) | `memory-hooks` | Real-time hook handlers for session start and pre/post read/write events |
 
 ---
@@ -137,7 +137,7 @@ cargo test          # 91 tests across all 4 crates
 |-------|----------|
 | Usage examples and CLAUDE.md setup | [docs/USAGE.md](docs/USAGE.md) |
 | Manual installation | [docs/MANUAL_INSTALL.md](docs/MANUAL_INSTALL.md) |
-| MCP tools (13 tools) | [memory-mcp-server/README.md](memory-mcp-server/README.md) |
+| MCP tools (12 tools) | [memory-mcp-server/README.md](memory-mcp-server/README.md) |
 | Hook behavior | [memory-hooks/README.md](memory-hooks/README.md) |
 | Database schema | [memory-common/README.md](memory-common/README.md#database-schema) |
 

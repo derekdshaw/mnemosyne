@@ -2,17 +2,20 @@
 
 use anyhow::Result;
 use rusqlite::Connection;
+use std::fmt::Write as _;
 
 use crate::HookInput;
 use memory_common::anatomy::Symbol;
 
-pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
+pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
     let file_path = match input.file_path() {
         Some(fp) => fp,
-        None => return Ok(()),
+        None => return Ok(0),
     };
     let project = input.project();
     let session_id = input.session_id.as_deref().unwrap_or("");
+
+    let mut buf = String::new();
 
     if let Some(ref proj) = project {
         let anatomy: Option<(String, Option<i64>, Option<String>)> = conn
@@ -35,11 +38,11 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
             let token_info = tokens
                 .map(|t| format!(" (~{t} tokens)"))
                 .unwrap_or_default();
-            eprintln!("\u{1f4c4} {filename}: {description}{token_info}");
+            writeln!(buf, "\u{1f4c4} {filename}: {description}{token_info}")?;
 
             if let Some(json) = symbols_json {
                 if let Some(line) = format_symbols(&json) {
-                    eprintln!("   Symbols: {line}");
+                    writeln!(buf, "   Symbols: {line}")?;
                 }
             }
         }
@@ -61,13 +64,16 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<()> {
     if let Some((read_at, tokens)) = last_read {
         let token_info = tokens.map(|t| format!(" ~{t} tokens")).unwrap_or_default();
         let ago = humanize_ago(&read_at);
-        eprintln!(
+        writeln!(
+            buf,
             "\u{1f6ab} DUPLICATE READ \u{2014} already read {ago} in this session.{token_info} \
              Anatomy above shows available context; only re-read if anatomy is insufficient."
-        );
+        )?;
     }
 
-    Ok(())
+    let bytes = buf.len();
+    eprint!("{buf}");
+    Ok(bytes)
 }
 
 /// Format up to 8 symbols from the JSON-encoded `top_symbols_json` column as
@@ -142,7 +148,7 @@ mod tests {
     fn test_pre_read_no_anatomy() {
         let conn = memory_common::db::open_db_in_memory().unwrap();
         let input = make_input();
-        assert!(run(&conn, &input).is_ok());
+        let _ = run(&conn, &input).unwrap();
     }
 
     #[test]
@@ -155,7 +161,35 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(run(&conn, &input).is_ok());
+        let bytes = run(&conn, &input).unwrap();
+        assert!(
+            bytes > 0,
+            "duplicate-read warning should contribute bytes of overhead"
+        );
+    }
+
+    #[test]
+    fn test_pre_read_returns_zero_when_no_anatomy_or_duplicate() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        let bytes = run(&conn, &make_input()).unwrap();
+        assert_eq!(
+            bytes, 0,
+            "pre_read with no anatomy cached and no prior read should emit nothing"
+        );
+    }
+
+    #[test]
+    fn test_pre_read_returns_zero_without_file_path() {
+        let conn = memory_common::db::open_db_in_memory().unwrap();
+        let input = HookInput {
+            session_id: Some("test-session".into()),
+            cwd: Some("D:/r/myproject".into()),
+            tool_name: None,
+            tool_input: None,
+            tool_response: None,
+        };
+        let bytes = run(&conn, &input).unwrap();
+        assert_eq!(bytes, 0, "no file_path → early return, no overhead");
     }
 
     #[test]
@@ -175,7 +209,7 @@ mod tests {
         )
         .unwrap();
         let input = make_input();
-        assert!(run(&conn, &input).is_ok());
+        let _ = run(&conn, &input).unwrap();
     }
 
     #[test]

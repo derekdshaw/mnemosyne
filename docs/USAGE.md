@@ -172,14 +172,19 @@ Claude: calls get_session_detail({ session_id: "74810b85-..." })
              tool call summary (Read: 12, Edit: 5, Bash: 3)
 ```
 
-### Token Stats
+### Token Stats (tokens-only section)
+
+Pass `section: "tokens"` to skip the productivity + memory-health queries when
+you only care about token accounting. Same fields as the full report, with the
+omitted sections returned as empty Vec / 0 / None.
 
 ```
-Claude: calls get_token_stats({ project: "mnemosyne", days: 7 })
+Claude: calls get_analytics({ project: "mnemosyne", days: 7, section: "tokens" })
   -> Returns:
     {
       "period_days": 7,
       "project": "mnemosyne",
+      "section": "tokens",
       "total_sessions": 12,
       "total_input_tokens": 847200,
       "total_output_tokens": 423100,
@@ -189,25 +194,46 @@ Claude: calls get_token_stats({ project: "mnemosyne", days: 7 })
       "avg_output_per_session": 35258,
       "files_with_anatomy": 14,
       "total_file_reads": 187,
-      "repeated_reads_warned": 23,
+      "repeated_reads_detected": 23,
       "estimated_tokens_saveable": 27600,
+      "overhead_tokens": 8400,
+      "overhead_by_hook": [
+        { "hook_name": "session_start", "invocations": 12, "estimated_tokens": 5200,
+          "avg_tokens": 433.3, "min_tokens": 180, "max_tokens": 1820, "stddev_tokens": 412.7 },
+        { "hook_name": "pre_read", "invocations": 187, "estimated_tokens": 3200,
+          "avg_tokens": 17.1, "min_tokens": 8, "max_tokens": 42, "stddev_tokens": 6.3 }
+      ],
+      "net_savings_tokens": 19200,
       "top_sessions_by_tokens": [
         { "session_id": "74810b85-...", "project": "mnemosyne", "total_tokens": 142300, "start_time": "2026-04-09..." }
-      ]
+      ],
+      "tool_call_breakdown": [],
+      "top_read_files": [], "top_written_files": [],
+      "bug_count": 0, "bugs_by_file": [],
+      "context_items_by_category": [],
+      "total_do_not_repeat_rules": 0, "total_bugs_logged": 0,
+      "oldest_context_item": null,
+      "projects_with_context": [], "projects_without_context": []
     }
 ```
 
+Read `overhead_by_hook[].stddev_tokens` to judge whether a hook's cost is
+predictable: low stddev next to a high avg means every invocation is about the
+same; high stddev means some sessions pay much more. A session_start with high
+stddev usually means one project has heavy accumulated context (DNR rules,
+saved context, bugs) that bloats its briefing.
+
 ### Full Analytics Report
+
+Omit `section` (or pass `section: "full"`) to include productivity and memory-health data.
 
 ```
 Claude: calls get_analytics({ days: 30 })
-  -> Returns:
+  -> Returns: (all the fields above, populated)
     {
       "period_days": 30,
-      "total_sessions": 45,
-      "total_input_tokens": 3200000,
-      "total_output_tokens": 1600000,
-      "total_cache_read_tokens": 980000,
+      "section": "full",
+      ...usage/savings/overhead/top_sessions as above...
       "tool_call_breakdown": [
         { "tool_name": "Read", "count": 412 },
         { "tool_name": "Edit", "count": 187 },
@@ -225,10 +251,6 @@ Claude: calls get_analytics({ days: 30 })
       "bugs_by_file": [
         { "file_path": "src/parser/pack.rs", "bug_count": 3 }
       ],
-      "files_with_anatomy": 14,
-      "total_file_reads": 412,
-      "repeated_reads_detected": 47,
-      "estimated_tokens_saveable": 56400,
       "context_items_by_category": [
         { "category": "architecture", "count": 7 },
         { "category": "performance", "count": 4 },
