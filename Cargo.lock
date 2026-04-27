@@ -629,7 +629,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "memory-common"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "memory-hooks"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -659,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "memory-mcp-server"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "session-ingester"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "chrono",
