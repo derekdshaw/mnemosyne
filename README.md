@@ -103,6 +103,10 @@ The install script copies binaries to a standard location, registers the MCP ser
 
 For manual configuration without the install script, see [Manual Installation](docs/MANUAL_INSTALL.md).
 
+### Troubleshooting
+
+**If Mnemosyne crashes when saving context or executing an MCP call after an update, restart your machine to get rid of any ghost instances.** Long-lived MCP server processes from Claude sessions that were running during the upgrade can be SIGKILL'd by macOS code-signing once the binary on disk changes; the dead transport surfaces as `MCP error -32000: Connection closed`. A reboot (or quitting every Claude session) clears them out.
+
 ---
 
 ## Configure CLAUDE.md

@@ -69,8 +69,20 @@ if (-not (Test-Path $InstallDir)) {
 
 Write-Info "Installing binaries to $InstallDir"
 
+# Delete-then-copy, NOT Copy-Item -Force overwrite. Mirrors the macOS path
+# (where overwriting a running binary in place poisons mmap'd inodes and
+# AMFI SIGKILLs the running processes hours later, surfacing as
+# `save_context` returning `MCP error -32000: Connection closed`). On
+# Windows this also fails fast and loud if a Claude session still has the
+# binary open: Remove-Item will hit the file lock and the user can quit
+# those sessions before retrying the install instead of installing a
+# half-replaced binary.
 foreach ($bin in $Binaries) {
-    Copy-Item (Join-Path $BinSource $bin) (Join-Path $InstallDir $bin) -Force
+    $dest = Join-Path $InstallDir $bin
+    if (Test-Path $dest) {
+        Remove-Item $dest -Force
+    }
+    Copy-Item (Join-Path $BinSource $bin) $dest
     Write-Ok $bin
 }
 

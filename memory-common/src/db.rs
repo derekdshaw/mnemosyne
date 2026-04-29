@@ -20,12 +20,19 @@ pub fn db_path() -> Result<PathBuf> {
 pub fn open_db() -> Result<Connection> {
     let path = db_path()?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory: {}", parent.display()))?;
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!(dir = %parent.display(), error = %e, "failed to create DB parent directory");
+            return Err(e)
+                .with_context(|| format!("failed to create directory: {}", parent.display()));
+        }
         // S6: Verify DB parent is not a symlink
         let meta = std::fs::symlink_metadata(parent)
-            .with_context(|| format!("failed to read metadata: {}", parent.display()))?;
+            .with_context(|| format!("failed to read metadata: {}", parent.display()))
+            .inspect_err(|e| {
+                tracing::error!(dir = %parent.display(), error = %e, "failed to stat DB parent");
+            })?;
         if meta.file_type().is_symlink() {
+            tracing::error!(dir = %parent.display(), "DB parent directory is a symlink — refusing to open");
             anyhow::bail!(
                 "database parent directory is a symlink: {}",
                 parent.display()
@@ -33,7 +40,10 @@ pub fn open_db() -> Result<Connection> {
         }
     }
     let conn = Connection::open(&path)
-        .with_context(|| format!("failed to open database: {}", path.display()))?;
+        .with_context(|| format!("failed to open database: {}", path.display()))
+        .inspect_err(|e| {
+            tracing::error!(path = %path.display(), error = %e, "failed to open SQLite connection");
+        })?;
     // S7: Set restrictive permissions on Unix
     #[cfg(unix)]
     {
@@ -44,8 +54,13 @@ pub fn open_db() -> Result<Connection> {
             let _ = std::fs::set_permissions(&path, perms);
         }
     }
-    setup_pragmas(&conn)?;
-    run_migrations(&conn)?;
+    setup_pragmas(&conn).inspect_err(|e| {
+        tracing::error!(error = %e, "setup_pragmas failed");
+    })?;
+    run_migrations(&conn).inspect_err(|e| {
+        tracing::error!(error = %e, "run_migrations failed");
+    })?;
+    tracing::debug!(path = %path.display(), "DB opened");
     Ok(conn)
 }
 
@@ -55,7 +70,8 @@ pub fn open_db() -> Result<Connection> {
 /// flush before the process is killed, which left us with a 5 MB WAL pinning
 /// the DB across sessions.
 pub fn checkpoint_wal(conn: &Connection) -> Result<()> {
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .inspect_err(|e| tracing::error!(error = %e, "wal_checkpoint(TRUNCATE) failed"))?;
     Ok(())
 }
 
@@ -76,19 +92,73 @@ fn setup_pragmas(conn: &Connection) -> Result<()> {
 }
 
 /// Current schema version. Bump this whenever schema changes.
-const SCHEMA_VERSION: i64 = 4;
+///
+/// History:
+/// - v1: initial schema (sessions, messages, tool_calls, FTS)
+/// - v2: `original_length` columns on context_items / messages / bugs (caveman compression)
+/// - v3: `top_symbols_json` column on file_anatomy (symbol-line index)
+/// - v4: (no-op bump for tracking)
+/// - v5: re-runs the additive ALTERs because some v4 DBs were stamped before the
+///       v3 column add landed in `run_migrations_unconditionally`. Any DB sitting
+///       at v4 missing `top_symbols_json` re-applies and stamps v5.
+const SCHEMA_VERSION: i64 = 5;
 
-/// Runs schema migrations only if the database is behind the current version.
-/// Uses PRAGMA user_version to skip all migration work when schema is current.
+/// Runs schema migrations.
+///
+/// Two layers:
+/// 1. **Always-run idempotent ALTERs** ([`run_idempotent_alters`]). Cheap, pure
+///    `ADD COLUMN IF NOT EXISTS`-equivalent. Runs on every open so a missed
+///    `SCHEMA_VERSION` bump can't leave the DB without an additive column —
+///    the bug we hit at v4 with `top_symbols_json`.
+/// 2. **Version-gated full migration** (CREATE TABLE / CREATE INDEX / FTS).
+///    Skipped when `user_version >= SCHEMA_VERSION` since those are already
+///    `IF NOT EXISTS` but cost a few extra round-trips.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
-    let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if current >= SCHEMA_VERSION {
-        return Ok(());
+    let current: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .inspect_err(|e| tracing::error!(error = %e, "failed to read PRAGMA user_version"))?;
+
+    if current < SCHEMA_VERSION {
+        tracing::info!(
+            from_version = current,
+            to_version = SCHEMA_VERSION,
+            "running schema migrations"
+        );
+
+        run_migrations_unconditionally(conn).inspect_err(|e| {
+            tracing::error!(error = %e, "schema migration batch failed");
+        })?;
+
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+            .inspect_err(|e| tracing::error!(error = %e, "failed to stamp PRAGMA user_version"))?;
+        tracing::info!(version = SCHEMA_VERSION, "schema migrations complete");
     }
 
-    run_migrations_unconditionally(conn)?;
+    // Always run additive ALTERs *after* full migrations have created the tables.
+    // Cheap because `add_column_if_not_exists` no-ops when the column is already
+    // present, and protects against a missed `SCHEMA_VERSION` bump.
+    run_idempotent_alters(conn).inspect_err(|e| {
+        tracing::error!(error = %e, "idempotent ALTER batch failed");
+    })?;
 
-    conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+    Ok(())
+}
+
+/// Idempotent additive column migrations. Runs on every DB open, cheap because
+/// `add_column_if_not_exists` swallows the "duplicate column" error after a
+/// single failed ALTER. Keep this list append-only — never drop or modify
+/// columns here.
+fn run_idempotent_alters(conn: &Connection) -> Result<()> {
+    // V2: original_length for caveman compression tracking.
+    add_column_if_not_exists(conn, "context_items", "original_length", "INTEGER")?;
+    add_column_if_not_exists(conn, "messages", "original_length", "INTEGER")?;
+    add_column_if_not_exists(conn, "bugs", "original_length", "INTEGER")?;
+
+    // V3: Symbol-line index on file_anatomy. JSON-encoded array of [kind, name, line]
+    // triples so the pre-read hook can let Claude jump straight to a symbol instead
+    // of reading the whole file.
+    add_column_if_not_exists(conn, "file_anatomy", "top_symbols_json", "TEXT")?;
+
     Ok(())
 }
 
@@ -135,15 +205,8 @@ fn run_migrations_unconditionally(conn: &Connection) -> Result<()> {
         }
     }
 
-    // V2: Add original_length column for caveman compression tracking
-    add_column_if_not_exists(conn, "context_items", "original_length", "INTEGER")?;
-    add_column_if_not_exists(conn, "messages", "original_length", "INTEGER")?;
-    add_column_if_not_exists(conn, "bugs", "original_length", "INTEGER")?;
-
-    // V3: Symbol-line index on file_anatomy. JSON-encoded array of [kind, name, line]
-    // triples so the pre-read hook can let Claude jump straight to a symbol instead
-    // of reading the whole file.
-    add_column_if_not_exists(conn, "file_anatomy", "top_symbols_json", "TEXT")?;
+    // Additive column migrations live in `run_idempotent_alters`, which runs on
+    // every DB open. Don't duplicate them here.
 
     Ok(())
 }

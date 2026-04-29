@@ -69,7 +69,19 @@ impl HookInput {
 }
 
 fn main() {
+    memory_common::logging::init("memory-hooks", "info");
+
     let cli = Cli::parse();
+    let hook_name: &'static str = match cli.command {
+        Command::PreRead => "pre_read",
+        Command::PostRead => "post_read",
+        Command::PreWrite => "pre_write",
+        Command::PostWrite => "post_write",
+        Command::SessionStart => "session_start",
+    };
+    let span = tracing::info_span!("hook", name = hook_name, pid = std::process::id());
+    let _enter = span.enter();
+    tracing::debug!("hook invoked");
 
     // S10: Read stdin JSON with 1MB limit to prevent OOM from malicious input
     let mut input_str = String::new();
@@ -77,44 +89,50 @@ fn main() {
         .take(1_048_576)
         .read_to_string(&mut input_str)
     {
-        eprintln!("mnemosyne: failed to read stdin: {e}");
+        tracing::error!(error = %e, "failed to read stdin");
         std::process::exit(0); // Never block — exit 0
     }
 
     let hook_input: HookInput = match serde_json::from_str(&input_str) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("mnemosyne: failed to parse hook input: {e}");
+            tracing::error!(error = %e, input_len = input_str.len(), "failed to parse hook input");
             std::process::exit(0);
         }
     };
 
-    // Open DB — if it fails, exit silently (don't block Claude)
+    // Open DB — if it fails, log and exit silently (don't block Claude)
     let conn = match db::open_db() {
         Ok(c) => c,
-        Err(_) => std::process::exit(0),
+        Err(e) => {
+            tracing::error!(error = ?e, "failed to open DB; hook is advisory, exiting cleanly");
+            std::process::exit(0);
+        }
     };
 
-    let (hook_name, result) = match cli.command {
-        Command::PreRead => ("pre_read", pre_read::run(&conn, &hook_input)),
-        Command::PostRead => ("post_read", post_read::run(&conn, &hook_input)),
-        Command::PreWrite => ("pre_write", pre_write::run(&conn, &hook_input)),
-        Command::PostWrite => ("post_write", post_write::run(&conn, &hook_input)),
-        Command::SessionStart => ("session_start", session_start::run(&conn, &hook_input)),
+    let result = match cli.command {
+        Command::PreRead => pre_read::run(&conn, &hook_input),
+        Command::PostRead => post_read::run(&conn, &hook_input),
+        Command::PreWrite => pre_write::run(&conn, &hook_input),
+        Command::PostWrite => post_write::run(&conn, &hook_input),
+        Command::SessionStart => session_start::run(&conn, &hook_input),
     };
 
     match result {
         Ok(bytes) => {
-            let _ = db::record_overhead(
+            tracing::debug!(bytes, "hook ok");
+            if let Err(e) = db::record_overhead(
                 &conn,
                 hook_input.session_id.as_deref(),
                 hook_input.project().as_deref(),
                 hook_name,
                 bytes,
-            );
+            ) {
+                tracing::warn!(error = %e, "failed to record hook overhead");
+            }
         }
         Err(e) => {
-            eprintln!("mnemosyne: hook error: {e}");
+            tracing::error!(error = ?e, "hook handler returned error");
         }
     }
 

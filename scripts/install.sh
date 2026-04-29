@@ -83,7 +83,15 @@ mkdir -p "$INSTALL_DIR"
 
 info "Installing binaries to $INSTALL_DIR"
 
+# Delete-then-copy, NOT cp-overwrite. Overwriting a running binary in place
+# mutates the same inode that long-lived Claude sessions still have mmap'd;
+# macOS's AMFI later revalidates code pages against the on-disk hash, fails,
+# and SIGKILLs those processes ("Code Signature Invalid"). The user sees it
+# as `save_context` returning `MCP error -32000: Connection closed`.
+# Unlinking first creates a fresh inode for the new binary while the old
+# inode (still held by existing mmaps) lives on untouched.
 for bin in "${BINARIES[@]}"; do
+    rm -f "$INSTALL_DIR/$bin"
     cp "$BIN_SOURCE/$bin" "$INSTALL_DIR/$bin"
     chmod +x "$INSTALL_DIR/$bin"
     ok "$bin"

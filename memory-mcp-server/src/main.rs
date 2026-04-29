@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tools::*;
+use tracing::Instrument;
 
 /// Waits for any shutdown signal the host OS exposes, then returns. On unix
 /// that's SIGTERM / SIGHUP / SIGINT; on Windows it's ctrl_c / ctrl_break /
@@ -126,6 +127,24 @@ fn clamp_days(days: Option<i64>) -> i64 {
     days.unwrap_or(7).clamp(1, 365)
 }
 
+/// Logs the error at `error!` level (which inherits the active tracing span,
+/// so the tool name set by `#[tracing::instrument]` appears in the record) and
+/// converts it into an `internal_error` MCP response. Use on every fallible DB
+/// or rmcp call inside a tool handler — keeps the call-site terse while still
+/// producing structured logs for every error path.
+trait LogErr<T> {
+    fn log_internal(self, op: &'static str) -> Result<T, rmcp::ErrorData>;
+}
+
+impl<T, E: std::fmt::Display> LogErr<T> for Result<T, E> {
+    fn log_internal(self, op: &'static str) -> Result<T, rmcp::ErrorData> {
+        self.map_err(|e| {
+            tracing::error!(op, error = %e, "tool operation failed");
+            rmcp::ErrorData::internal_error(e.to_string(), None)
+        })
+    }
+}
+
 struct MnemosyneServer {
     // S8: If a tool handler panics, Mutex becomes poisoned. All subsequent .lock() calls
     // return PoisonError, which we map to MCP error responses — the server degrades
@@ -145,40 +164,89 @@ impl MnemosyneServer {
 
     /// Runs a synchronous DB closure on a blocking worker with the default
     /// HANDLER_TIMEOUT. All tool handlers go through this helper.
-    async fn run_db<F, T>(&self, f: F) -> Result<T, rmcp::ErrorData>
+    ///
+    /// `tool` is the MCP tool name; it becomes a span field on every log
+    /// emitted by the closure (and on the timing/error records emitted by
+    /// `run_db_with_timeout` itself), so a single grep on `tool=save_context`
+    /// surfaces every event from that handler.
+    async fn run_db<F, T>(&self, tool: &'static str, f: F) -> Result<T, rmcp::ErrorData>
     where
         F: FnOnce(&Connection) -> Result<T, rmcp::ErrorData> + Send + 'static,
         T: Send + 'static,
     {
-        self.run_db_with_timeout(HANDLER_TIMEOUT, f).await
+        self.run_db_with_timeout(tool, HANDLER_TIMEOUT, f).await
     }
 
     /// Internal helper that bumps activity, runs `f` on the blocking pool, and
     /// enforces `timeout`. Factored out so tests can drive a short deadline
     /// without touching production constants.
-    async fn run_db_with_timeout<F, T>(&self, timeout: Duration, f: F) -> Result<T, rmcp::ErrorData>
+    async fn run_db_with_timeout<F, T>(
+        &self,
+        tool: &'static str,
+        timeout: Duration,
+        f: F,
+    ) -> Result<T, rmcp::ErrorData>
     where
         F: FnOnce(&Connection) -> Result<T, rmcp::ErrorData> + Send + 'static,
         T: Send + 'static,
     {
+        let span = tracing::info_span!("tool", name = tool);
+        let _enter = span.enter();
+        tracing::debug!("tool invoked");
         self.bump_activity();
         let db = self.db.clone();
+        let started = Instant::now();
+        let parent = span.clone();
         let handle = tokio::task::spawn_blocking(move || {
-            let conn = db
-                .lock()
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let _g = parent.enter();
+            let conn = match db.lock() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(error = %e, "DB mutex poisoned — a previous handler panicked");
+                    return Err(rmcp::ErrorData::internal_error(e.to_string(), None));
+                }
+            };
             f(&conn)
         });
-        match tokio::time::timeout(timeout, handle).await {
-            Ok(Ok(res)) => res,
-            Ok(Err(join_err)) => Err(rmcp::ErrorData::internal_error(
-                format!("handler task join error: {join_err}"),
-                None,
-            )),
-            Err(_) => Err(rmcp::ErrorData::internal_error(
-                format!("handler timed out after {}s", timeout.as_secs()),
-                None,
-            )),
+        drop(_enter);
+        let outcome = tokio::time::timeout(timeout, handle)
+            .instrument(span.clone())
+            .await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let _enter = span.enter();
+        match outcome {
+            Ok(Ok(Ok(v))) => {
+                tracing::debug!(elapsed_ms, "tool ok");
+                Ok(v)
+            }
+            Ok(Ok(Err(e))) => {
+                // The closure already logged via `log_internal`; record duration so
+                // we can correlate slow failures.
+                tracing::debug!(elapsed_ms, "tool returned error");
+                Err(e)
+            }
+            Ok(Err(join_err)) => {
+                tracing::error!(
+                    elapsed_ms,
+                    error = %join_err,
+                    "blocking task panicked or was cancelled"
+                );
+                Err(rmcp::ErrorData::internal_error(
+                    format!("handler task join error: {join_err}"),
+                    None,
+                ))
+            }
+            Err(_) => {
+                tracing::error!(
+                    elapsed_ms,
+                    timeout_secs = timeout.as_secs(),
+                    "tool timed out"
+                );
+                Err(rmcp::ErrorData::internal_error(
+                    format!("handler timed out after {}s", timeout.as_secs()),
+                    None,
+                ))
+            }
         }
     }
 }
@@ -218,7 +286,7 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<SearchSessionsInput>,
     ) -> Result<Json<SessionResultList>, rmcp::ErrorData> {
-        self.run_db(move |conn| {
+        self.run_db("search_sessions", move |conn| {
             let limit = clamp_limit(input.limit);
 
             // FTS5's snippet() requires the FTS table to be directly in the FROM clause
@@ -248,9 +316,7 @@ impl MnemosyneServer {
             // Over-fetch to account for dedup — we'll trim to limit after
             sql.push_str(&format!(" LIMIT {}", limit * 5));
 
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let mut stmt = conn.prepare(&sql).log_internal("search_sessions:01")?;
             let all_rows: Vec<SessionResult> = stmt
                 .query_map(rusqlite::params_from_iter(&params), |row| {
                     Ok(SessionResult {
@@ -263,7 +329,7 @@ impl MnemosyneServer {
                         matching_excerpt: row.get(6)?,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("search_sessions:02")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -286,7 +352,7 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetRecentSessionsInput>,
     ) -> Result<Json<SessionResultList>, rmcp::ErrorData> {
-        self.run_db(move |conn| {
+        self.run_db("get_recent_sessions", move |conn| {
             let days = clamp_days(input.days);
 
             let mut sql = String::from(
@@ -302,9 +368,7 @@ impl MnemosyneServer {
             }
             sql.push_str(" ORDER BY start_time DESC LIMIT 50");
 
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let mut stmt = conn.prepare(&sql).log_internal("get_recent_sessions:01")?;
             let results = stmt
                 .query_map(rusqlite::params_from_iter(&params), |row| {
                     Ok(SessionResult {
@@ -317,7 +381,7 @@ impl MnemosyneServer {
                         matching_excerpt: None,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("get_recent_sessions:02")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -332,7 +396,7 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetSessionDetailInput>,
     ) -> Result<Json<SessionDetail>, rmcp::ErrorData> {
-        self.run_db(move |conn| {
+        self.run_db("get_session_detail", move |conn| {
             let session: SessionDetail = conn
                 .query_row(
                     "SELECT session_id, project, start_time, end_time, cwd, git_branch, \
@@ -356,7 +420,7 @@ impl MnemosyneServer {
                         })
                     },
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_session_detail:01")?;
 
             // Get first and last user messages
             let first_msg: Option<String> = conn
@@ -383,7 +447,7 @@ impl MnemosyneServer {
                     "SELECT tool_name, COUNT(*) as cnt FROM tool_calls WHERE session_id = ?1 \
                      GROUP BY tool_name ORDER BY cnt DESC",
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_session_detail:02")?;
             let tool_summary: Vec<ToolSummaryEntry> = stmt
                 .query_map([&input.session_id], |row| {
                     Ok(ToolSummaryEntry {
@@ -391,7 +455,7 @@ impl MnemosyneServer {
                         count: row.get(1)?,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("get_session_detail:03")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -411,7 +475,7 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetFileHistoryInput>,
     ) -> Result<Json<FileHistoryList>, rmcp::ErrorData> {
-        self.run_db(move |conn| {
+        self.run_db("get_file_history", move |conn| {
             // Static query with 3 fixed params — empty string means "no filter".
             let file_path_pattern = input
                 .file_path
@@ -438,9 +502,7 @@ impl MnemosyneServer {
                  AND (?3 = '' OR tc.timestamp >= datetime('now', ?3)) \
                  ORDER BY tc.timestamp DESC LIMIT 50";
 
-            let mut stmt = conn
-                .prepare(sql)
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let mut stmt = conn.prepare(sql).log_internal("get_file_history:01")?;
             let results = stmt
                 .query_map(rusqlite::params_from_iter(&params), |row| {
                     Ok(FileHistoryEntry {
@@ -452,7 +514,7 @@ impl MnemosyneServer {
                         timestamp: row.get(5)?,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("get_file_history:02")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -470,6 +532,7 @@ impl MnemosyneServer {
         // S4: Validate and truncate input (done outside the blocking closure so we
         // fail fast without needing a DB lock).
         if input.content.is_empty() {
+            tracing::warn!(tool = "save_context", "rejected: empty content");
             return Err(rmcp::ErrorData::invalid_request(
                 "content must not be empty",
                 None,
@@ -486,20 +549,20 @@ impl MnemosyneServer {
         let project = input.project.clone();
         let category = input.category.clone();
 
-        self.run_db(move |conn| {
+        self.run_db("save_context", move |conn| {
             conn.execute(
                 "INSERT INTO context_items (project, category, content, created_at, original_length) \
                  VALUES (?1, ?2, ?3, datetime('now'), ?4)",
                 rusqlite::params![project, category, content, original_length],
             )
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .log_internal("save_context:01")?;
 
             let id = conn.last_insert_rowid();
             conn.execute(
                 "INSERT INTO context_fts (item_id, project, category, content) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![id.to_string(), project, category, content],
             )
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .log_internal("save_context:02")?;
 
             let suffix = if compressed { ", compressed" } else { "" };
             Ok(Json(SimpleResult {
@@ -516,7 +579,7 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<SearchContextInput>,
     ) -> Result<Json<ContextItemList>, rmcp::ErrorData> {
-        self.run_db(move |conn| {
+        self.run_db("search_context", move |conn| {
             let limit = clamp_limit(input.limit);
 
             let mut sql = String::from(
@@ -537,9 +600,7 @@ impl MnemosyneServer {
             }
             sql.push_str(&format!(" LIMIT {limit}"));
 
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let mut stmt = conn.prepare(&sql).log_internal("search_context:01")?;
             let results = stmt
                 .query_map(rusqlite::params_from_iter(&params), |row| {
                     Ok(ContextItemResult {
@@ -550,7 +611,7 @@ impl MnemosyneServer {
                         created_at: row.get(4)?,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("search_context:02")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -565,14 +626,14 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetProjectSummaryInput>,
     ) -> Result<Json<ProjectSummary>, rmcp::ErrorData> {
-        self.run_db(move |conn| {
+        self.run_db("get_project_summary", move |conn| {
             // Context items
             let mut stmt = conn
                 .prepare(
                     "SELECT id, project, category, content, created_at FROM context_items \
                      WHERE (project IS NULL OR ?1 IS NULL OR project = ?1) ORDER BY category, created_at DESC",
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_project_summary:01")?;
             let context_items: Vec<ContextItemResult> = stmt
                 .query_map([&input.project], |row| {
                     Ok(ContextItemResult {
@@ -583,7 +644,7 @@ impl MnemosyneServer {
                         created_at: row.get(4)?,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("get_project_summary:02")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -593,7 +654,7 @@ impl MnemosyneServer {
                     "SELECT id, error_message, root_cause, fix_description, tags, file_path, created_at \
                      FROM bugs WHERE (project IS NULL OR ?1 IS NULL OR project = ?1) ORDER BY created_at DESC LIMIT 20",
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_project_summary:03")?;
             let recent_bugs: Vec<BugResult> = stmt
                 .query_map([&input.project], |row| {
                     Ok(BugResult {
@@ -606,7 +667,7 @@ impl MnemosyneServer {
                         created_at: row.get(6)?,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("get_project_summary:04")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -616,7 +677,7 @@ impl MnemosyneServer {
                     "SELECT id, rule, reason, file_path, created_at FROM do_not_repeat \
                      WHERE (project IS NULL OR ?1 IS NULL OR project = ?1) ORDER BY created_at DESC",
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_project_summary:05")?;
             let do_not_repeat: Vec<DoNotRepeatResult> = stmt
                 .query_map([&input.project], |row| {
                     Ok(DoNotRepeatResult {
@@ -627,7 +688,7 @@ impl MnemosyneServer {
                         created_at: row.get(4)?,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("get_project_summary:06")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -640,7 +701,7 @@ impl MnemosyneServer {
                     [&input.project],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_project_summary:07")?;
 
             Ok(Json(ProjectSummary {
                 project: input.project,
@@ -664,6 +725,12 @@ impl MnemosyneServer {
         // S4: Validate and truncate input (outside the DB closure so we fail fast
         // without contending for the connection lock).
         if input.error_message.is_empty() || input.fix_description.is_empty() {
+            tracing::warn!(
+                tool = "log_bug",
+                empty_err = input.error_message.is_empty(),
+                empty_fix = input.fix_description.is_empty(),
+                "rejected: empty required fields"
+            );
             return Err(rmcp::ErrorData::invalid_request(
                 "error_message and fix_description must not be empty",
                 None,
@@ -687,7 +754,7 @@ impl MnemosyneServer {
         let project = input.project.clone();
         let tags = input.tags.clone();
 
-        self.run_db(move |conn| {
+        self.run_db("log_bug", move |conn| {
             // M4: Use input.project instead of hardcoded NULL
             conn.execute(
                 "INSERT INTO bugs (project, error_message, root_cause, fix_description, tags, file_path, created_at, original_length) \
@@ -702,7 +769,7 @@ impl MnemosyneServer {
                     original_length,
                 ],
             )
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .log_internal("log_bug:01")?;
 
             let id = conn.last_insert_rowid();
             conn.execute(
@@ -717,7 +784,7 @@ impl MnemosyneServer {
                     fix_description,
                 ],
             )
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .log_internal("log_bug:02")?;
 
             let suffix = if compressed { ", compressed" } else { "" };
             Ok(Json(SimpleResult {
@@ -734,7 +801,7 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<SearchBugsInput>,
     ) -> Result<Json<BugResultList>, rmcp::ErrorData> {
-        self.run_db(move |conn| {
+        self.run_db("search_bugs", move |conn| {
             let mut sql = String::from(
                 "SELECT b.id, b.error_message, b.root_cause, b.fix_description, b.tags, b.file_path, b.created_at \
                  FROM bugs_fts f \
@@ -758,7 +825,7 @@ impl MnemosyneServer {
 
             let mut stmt = conn
                 .prepare(&sql)
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("search_bugs:01")?;
             let results = stmt
                 .query_map(rusqlite::params_from_iter(&params), |row| {
                     Ok(BugResult {
@@ -771,7 +838,7 @@ impl MnemosyneServer {
                         created_at: row.get(6)?,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("search_bugs:02")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -788,6 +855,7 @@ impl MnemosyneServer {
     ) -> Result<Json<SimpleResult>, rmcp::ErrorData> {
         // S4: Validate and truncate input (outside the DB closure).
         if input.rule.is_empty() {
+            tracing::warn!(tool = "add_do_not_repeat", "rejected: empty rule");
             return Err(rmcp::ErrorData::invalid_request(
                 "rule must not be empty",
                 None,
@@ -798,7 +866,7 @@ impl MnemosyneServer {
         let file_path = input.file_path.as_deref().map(db::normalize_path);
         let project = input.project.clone();
 
-        self.run_db(move |conn| {
+        self.run_db("add_do_not_repeat", move |conn| {
             // No FTS table for do_not_repeat — rules are few per project and retrieved
             // by exact project/file match, not free-text search.
             conn.execute(
@@ -806,7 +874,7 @@ impl MnemosyneServer {
                  VALUES (?1, ?2, ?3, ?4, datetime('now'))",
                 rusqlite::params![project, rule, reason, file_path],
             )
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .log_internal("add_do_not_repeat:01")?;
 
             let id = conn.last_insert_rowid();
             let scope = match (&project, &file_path) {
@@ -829,7 +897,7 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetDoNotRepeatInput>,
     ) -> Result<Json<DoNotRepeatList>, rmcp::ErrorData> {
-        self.run_db(move |conn| {
+        self.run_db("get_do_not_repeat", move |conn| {
             // Static query with nullable params — NULL means "no filter".
             // file_path filter also includes rules with NULL file_path (global rules).
             let file_path = input.file_path.as_deref().map(db::normalize_path);
@@ -843,9 +911,7 @@ impl MnemosyneServer {
                        AND (?2 = '' OR file_path = ?2 OR file_path IS NULL) \
                        ORDER BY created_at DESC LIMIT 100";
 
-            let mut stmt = conn
-                .prepare(sql)
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let mut stmt = conn.prepare(sql).log_internal("get_do_not_repeat:01")?;
             let results = stmt
                 .query_map(rusqlite::params_from_iter(&params), |row| {
                     Ok(DoNotRepeatResult {
@@ -856,7 +922,7 @@ impl MnemosyneServer {
                         created_at: row.get(4)?,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("get_do_not_repeat:02")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -875,7 +941,7 @@ impl MnemosyneServer {
         &self,
         Parameters(input): Parameters<GetAnalyticsInput>,
     ) -> Result<Json<AnalyticsReport>, rmcp::ErrorData> {
-        self.run_db(move |conn| {
+        self.run_db("get_analytics", move |conn| {
             let days = clamp_days(input.days.or(Some(30)));
             let project = input.project.clone().unwrap_or_default();
             let params = [
@@ -891,7 +957,7 @@ impl MnemosyneServer {
                  FROM sessions WHERE start_time >= datetime('now', ?1) AND (?2 = '' OR project = ?2)",
                 rusqlite::params_from_iter(&params),
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            ).log_internal("get_analytics:01")?;
 
             let (cache_read, cache_creation): (i64, i64) = conn.query_row(
                 "SELECT COALESCE(SUM(tu.cache_read_tokens), 0), COALESCE(SUM(tu.cache_creation_tokens), 0) \
@@ -899,7 +965,7 @@ impl MnemosyneServer {
                  WHERE s.start_time >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2)",
                 rusqlite::params_from_iter(&params),
                 |row| Ok((row.get(0)?, row.get(1)?)),
-            ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            ).log_internal("get_analytics:02")?;
 
             let avg_input = if total_sessions > 0 { total_input / total_sessions } else { 0 };
             let avg_output = if total_sessions > 0 { total_output / total_sessions } else { 0 };
@@ -916,7 +982,7 @@ impl MnemosyneServer {
                          WHERE s.start_time >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2) \
                          GROUP BY tc.tool_name ORDER BY cnt DESC",
                         )
-                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                        .log_internal("get_analytics:03")?;
                     let tool_call_breakdown: Vec<ToolBreakdownEntry> = stmt
                         .query_map(rusqlite::params_from_iter(&params), |row| {
                             Ok(ToolBreakdownEntry {
@@ -924,7 +990,7 @@ impl MnemosyneServer {
                                 count: row.get(1)?,
                             })
                         })
-                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                        .log_internal("get_analytics:04")?
                         .filter_map(|r| r.ok())
                         .collect();
 
@@ -933,7 +999,7 @@ impl MnemosyneServer {
                             "SELECT file_path, times_read, estimated_tokens FROM file_anatomy \
                          WHERE (?1 = '' OR project = ?1) ORDER BY times_read DESC LIMIT 10",
                         )
-                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                        .log_internal("get_analytics:05")?;
                     let top_read_files: Vec<FileStatsEntry> = stmt
                         .query_map([&Param::Text(project.clone())], |row| {
                             Ok(FileStatsEntry {
@@ -942,14 +1008,14 @@ impl MnemosyneServer {
                                 estimated_tokens: row.get(2)?,
                             })
                         })
-                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                        .log_internal("get_analytics:06")?
                         .filter_map(|r| r.ok())
                         .collect();
 
                     let mut stmt = conn.prepare(
                         "SELECT file_path, times_written, estimated_tokens FROM file_anatomy \
                          WHERE (?1 = '' OR project = ?1) AND times_written > 0 ORDER BY times_written DESC LIMIT 10"
-                    ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    ).log_internal("get_analytics:07")?;
                     let top_written_files: Vec<FileStatsEntry> = stmt
                         .query_map([&Param::Text(project.clone())], |row| {
                             Ok(FileStatsEntry {
@@ -958,7 +1024,7 @@ impl MnemosyneServer {
                                 estimated_tokens: row.get(2)?,
                             })
                         })
-                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                        .log_internal("get_analytics:08")?
                         .filter_map(|r| r.ok())
                         .collect();
 
@@ -966,7 +1032,7 @@ impl MnemosyneServer {
                         "SELECT COUNT(*) FROM bugs WHERE created_at >= datetime('now', ?1) AND (?2 = '' OR project = ?2)",
                         rusqlite::params_from_iter(&params),
                         |row| row.get(0),
-                    ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    ).log_internal("get_analytics:09")?;
 
                     let mut stmt = conn
                         .prepare(
@@ -974,7 +1040,7 @@ impl MnemosyneServer {
                          WHERE file_path IS NOT NULL AND (?1 = '' OR project = ?1) \
                          GROUP BY file_path ORDER BY cnt DESC LIMIT 5",
                         )
-                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                        .log_internal("get_analytics:10")?;
                     let bugs_by_file: Vec<FileBugCount> = stmt
                         .query_map([&Param::Text(project.clone())], |row| {
                             Ok(FileBugCount {
@@ -982,7 +1048,7 @@ impl MnemosyneServer {
                                 bug_count: row.get(1)?,
                             })
                         })
-                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                        .log_internal("get_analytics:11")?
                         .filter_map(|r| r.ok())
                         .collect();
 
@@ -1003,7 +1069,7 @@ impl MnemosyneServer {
                     [&Param::Text(project.clone())],
                     |row| row.get(0),
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_analytics:12")?;
 
             let total_file_reads: i64 = conn
                 .query_row(
@@ -1013,7 +1079,7 @@ impl MnemosyneServer {
                     rusqlite::params_from_iter(&params),
                     |row| row.get(0),
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_analytics:13")?;
 
             let repeated_reads: i64 = conn
                 .query_row(
@@ -1026,7 +1092,7 @@ impl MnemosyneServer {
                     rusqlite::params_from_iter(&params),
                     |row| row.get(0),
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_analytics:14")?;
 
             // MIN(id) subquery stays global so a re-read inside the window still
             // counts as saveable when its first read happened outside the window.
@@ -1039,7 +1105,7 @@ impl MnemosyneServer {
                     rusqlite::params_from_iter(&params),
                     |row| row.get(0),
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_analytics:15")?;
 
             let overhead_tokens: i64 = conn
                 .query_row(
@@ -1048,7 +1114,7 @@ impl MnemosyneServer {
                     rusqlite::params_from_iter(&params),
                     |row| row.get(0),
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_analytics:16")?;
 
             // Overhead breakdown by hook — distribution stats let callers spot
             // outliers (a heavy briefing project runs avg well above the mean).
@@ -1064,7 +1130,7 @@ impl MnemosyneServer {
                  WHERE emitted_at >= datetime('now', ?1) AND (?2 = '' OR project = ?2) \
                  GROUP BY hook_name ORDER BY SUM(estimated_tokens) DESC",
                 )
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                .log_internal("get_analytics:17")?;
             let overhead_by_hook: Vec<HookOverheadEntry> = stmt
                 .query_map(rusqlite::params_from_iter(&params), |row| {
                     let avg: f64 = row.get(3)?;
@@ -1082,7 +1148,7 @@ impl MnemosyneServer {
                         stddev_tokens: variance.sqrt(),
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("get_analytics:18")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -1091,7 +1157,7 @@ impl MnemosyneServer {
                 "SELECT session_id, project, (total_input_tokens + total_output_tokens) as total, start_time \
                  FROM sessions WHERE start_time >= datetime('now', ?1) AND (?2 = '' OR project = ?2) \
                  ORDER BY total DESC LIMIT 5"
-            ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            ).log_internal("get_analytics:19")?;
             let top_sessions: Vec<TokenSessionEntry> = stmt
                 .query_map(rusqlite::params_from_iter(&params), |row| {
                     Ok(TokenSessionEntry {
@@ -1101,7 +1167,7 @@ impl MnemosyneServer {
                         start_time: row.get(3)?,
                     })
                 })
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .log_internal("get_analytics:20")?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -1121,7 +1187,7 @@ impl MnemosyneServer {
                         "SELECT category, COUNT(*) FROM context_items \
                      WHERE (?1 = '' OR project = ?1) GROUP BY category ORDER BY COUNT(*) DESC",
                     )
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    .log_internal("get_analytics:21")?;
                 let context_items_by_category: Vec<CategoryCount> = stmt
                     .query_map([&Param::Text(project.clone())], |row| {
                         Ok(CategoryCount {
@@ -1129,7 +1195,7 @@ impl MnemosyneServer {
                             count: row.get(1)?,
                         })
                     })
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                    .log_internal("get_analytics:22")?
                     .filter_map(|r| r.ok())
                     .collect();
 
@@ -1139,7 +1205,7 @@ impl MnemosyneServer {
                         [&Param::Text(project.clone())],
                         |row| row.get(0),
                     )
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    .log_internal("get_analytics:23")?;
 
                 let total_bugs: i64 = conn
                     .query_row(
@@ -1147,7 +1213,7 @@ impl MnemosyneServer {
                         [&Param::Text(project.clone())],
                         |row| row.get(0),
                     )
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    .log_internal("get_analytics:24")?;
 
                 let oldest_context: Option<String> = conn
                     .query_row(
@@ -1155,26 +1221,26 @@ impl MnemosyneServer {
                         [&Param::Text(project.clone())],
                         |row| row.get(0),
                     )
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    .log_internal("get_analytics:25")?;
 
                 let mut stmt = conn
                     .prepare(
                         "SELECT DISTINCT project FROM context_items WHERE project IS NOT NULL",
                     )
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                    .log_internal("get_analytics:26")?;
                 let projects_with: Vec<String> = stmt
                     .query_map([], |row| row.get(0))
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                    .log_internal("get_analytics:27")?
                     .filter_map(|r| r.ok())
                     .collect();
 
                 let mut stmt = conn.prepare(
                     "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL \
                      AND project NOT IN (SELECT DISTINCT project FROM context_items WHERE project IS NOT NULL)"
-                ).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                ).log_internal("get_analytics:28")?;
                 let projects_without: Vec<String> = stmt
                     .query_map([], |row| row.get(0))
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                    .log_internal("get_analytics:29")?
                     .filter_map(|r| r.ok())
                     .collect();
 
@@ -1250,13 +1316,37 @@ impl MnemosyneServer {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Log to stderr so it doesn't interfere with MCP stdio transport
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .with_writer(std::io::stderr)
-        .init();
+    memory_common::logging::init("memory-mcp-server", "info");
 
-    let server = MnemosyneServer::new()?;
+    // Startup diagnostics. If a future invocation hangs in the dynamic linker
+    // before this line runs (as happened on macOS 26 when the kernel exec
+    // cache for /usr/local/bin/memory-mcp-server got wedged), the *absence*
+    // of this line in the log file is the signal that startup never reached
+    // user code.
+    let pid = std::process::id();
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("<current_exe failed: {e}>"));
+    let db_path = memory_common::db::db_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("<db_path failed: {e}>"));
+    tracing::info!(
+        pid,
+        version = env!("CARGO_PKG_VERSION"),
+        exe = %exe,
+        db = %db_path,
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        "Mnemosyne MCP server starting"
+    );
+
+    let server = match MnemosyneServer::new() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = ?e, "failed to construct MnemosyneServer");
+            return Err(e);
+        }
+    };
     // Keep handles for use after the rmcp service has taken ownership of `server`.
     // - `db_handle` lets us run the explicit WAL checkpoint on shutdown.
     // - `last_activity` lets the idle watchdog peek at the last tool-call time.
@@ -1283,8 +1373,6 @@ async fn main() -> Result<()> {
         wait_for_shutdown_signal().await;
         shutdown_sig.notify_waiters();
     });
-
-    tracing::info!("Mnemosyne MCP server starting on stdio");
 
     // Run the service; always run the shutdown checkpoint regardless of
     // whether we exit via stdin EOF, a signal, an idle timeout, or a startup
@@ -2306,7 +2394,7 @@ mod tests {
     async fn test_handler_timeout_returns_error() {
         let server = test_server();
         let res: Result<i32, _> = server
-            .run_db_with_timeout(Duration::from_millis(50), |_conn| {
+            .run_db_with_timeout("test", Duration::from_millis(50), |_conn| {
                 // Simulate a wedged SQL call by sleeping past the deadline.
                 std::thread::sleep(Duration::from_millis(500));
                 Ok(42)

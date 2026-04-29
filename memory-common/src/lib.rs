@@ -7,5 +7,6 @@ pub mod anatomy;
 pub mod compress;
 pub mod db;
 pub mod jsonl;
+pub mod logging;
 pub mod models;
 pub mod schema;
