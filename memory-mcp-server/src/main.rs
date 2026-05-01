@@ -83,11 +83,6 @@ async fn wait_for_shutdown_signal() {
 /// Defense against a wedged SQL call pinning the whole stdio service.
 const HANDLER_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Default idle timeout. If no tool has been invoked in this many seconds the
-/// server shuts itself down so a stuck parent (half-open stdin, broken pipe)
-/// cannot leave us running forever. Override with MNEMOSYNE_IDLE_TIMEOUT_SECS.
-const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1800;
-
 /// Stack-allocated SQL parameter enum. Avoids `Box<dyn ToSql>` heap allocations
 /// and the double-vec indirection (`Vec<Box<dyn ToSql>>` + `Vec<&dyn ToSql>`)
 /// that was previously needed for dynamic query building with optional filters.
@@ -150,18 +145,9 @@ struct MnemosyneServer {
     // return PoisonError, which we map to MCP error responses — the server degrades
     // gracefully rather than crashing, but DB operations stop working.
     db: Arc<Mutex<Connection>>,
-    // Updated at the start of every tool handler. The idle watchdog reads it to decide
-    // whether to trigger shutdown.
-    last_activity: Arc<Mutex<Instant>>,
 }
 
 impl MnemosyneServer {
-    fn bump_activity(&self) {
-        if let Ok(mut g) = self.last_activity.lock() {
-            *g = Instant::now();
-        }
-    }
-
     /// Runs a synchronous DB closure on a blocking worker with the default
     /// HANDLER_TIMEOUT. All tool handlers go through this helper.
     ///
@@ -193,7 +179,6 @@ impl MnemosyneServer {
         let span = tracing::info_span!("tool", name = tool);
         let _enter = span.enter();
         tracing::debug!("tool invoked");
-        self.bump_activity();
         let db = self.db.clone();
         let started = Instant::now();
         let parent = span.clone();
@@ -249,33 +234,6 @@ impl MnemosyneServer {
             }
         }
     }
-}
-
-/// Spawns a background task that notifies `shutdown` when `last_activity` has
-/// not been touched for `idle` duration. `tick` controls how often we check —
-/// production uses 10s; tests pass a small tick so the assertion completes quickly.
-fn spawn_idle_watcher(
-    last_activity: Arc<Mutex<Instant>>,
-    idle: Duration,
-    tick: Duration,
-    shutdown: Arc<Notify>,
-) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(tick);
-        ticker.tick().await; // skip the immediate first tick
-        loop {
-            ticker.tick().await;
-            let elapsed = last_activity
-                .lock()
-                .map(|g| g.elapsed())
-                .unwrap_or(Duration::ZERO);
-            if elapsed >= idle {
-                tracing::info!("idle timeout ({:?}) reached, shutting down", idle);
-                shutdown.notify_waiters();
-                break;
-            }
-        }
-    });
 }
 
 #[tool_router]
@@ -1301,7 +1259,6 @@ impl MnemosyneServer {
     fn new_with_conn(conn: Connection) -> Self {
         Self {
             db: Arc::new(Mutex::new(conn)),
-            last_activity: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
@@ -1309,7 +1266,6 @@ impl MnemosyneServer {
         let conn = db::open_db()?;
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
-            last_activity: Arc::new(Mutex::new(Instant::now())),
         })
     }
 }
@@ -1347,25 +1303,10 @@ async fn main() -> Result<()> {
             return Err(e);
         }
     };
-    // Keep handles for use after the rmcp service has taken ownership of `server`.
-    // - `db_handle` lets us run the explicit WAL checkpoint on shutdown.
-    // - `last_activity` lets the idle watchdog peek at the last tool-call time.
+    // `db_handle` lets us run the explicit WAL checkpoint on shutdown after the
+    // rmcp service has taken ownership of `server`.
     let db_handle = server.db.clone();
-    let last_activity = server.last_activity.clone();
     let shutdown = Arc::new(Notify::new());
-
-    // Idle watchdog: if no tool has been invoked in the configured window, fire
-    // shutdown. Prevents zombie processes when the parent leaves stdin half-open.
-    let idle_secs: u64 = std::env::var("MNEMOSYNE_IDLE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS);
-    spawn_idle_watcher(
-        last_activity,
-        Duration::from_secs(idle_secs),
-        Duration::from_secs(10),
-        shutdown.clone(),
-    );
 
     // Cross-platform signal handler: any OS shutdown signal triggers graceful exit.
     let shutdown_sig = shutdown.clone();
@@ -1375,8 +1316,8 @@ async fn main() -> Result<()> {
     });
 
     // Run the service; always run the shutdown checkpoint regardless of
-    // whether we exit via stdin EOF, a signal, an idle timeout, or a startup
-    // error (e.g. parent closed stdin before sending `initialize`).
+    // whether we exit via stdin EOF, a signal, or a startup error (e.g.
+    // parent closed stdin before sending `initialize`).
     let result = run_service(server, &shutdown).await;
 
     match db_handle.lock() {
@@ -2408,23 +2349,4 @@ mod tests {
         );
     }
 
-    /// The idle watcher fires `shutdown.notify_waiters()` when activity is stale
-    /// for longer than the configured idle duration.
-    #[tokio::test]
-    async fn test_idle_timeout_fires() {
-        let last_activity = Arc::new(Mutex::new(Instant::now()));
-        let shutdown = Arc::new(Notify::new());
-        // idle=100ms, tick=50ms — should trigger within ~150ms.
-        spawn_idle_watcher(
-            last_activity,
-            Duration::from_millis(100),
-            Duration::from_millis(50),
-            shutdown.clone(),
-        );
-        // Give the watcher a 1s window; it should fire well before that.
-        let fired = tokio::time::timeout(Duration::from_secs(1), shutdown.notified())
-            .await
-            .is_ok();
-        assert!(fired, "idle watcher did not notify within 1s");
-    }
 }
