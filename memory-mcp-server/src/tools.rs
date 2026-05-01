@@ -303,6 +303,28 @@ pub struct AnalyticsReport {
     pub files_with_anatomy: i64,
     pub total_file_reads: i64,
     pub repeated_reads_detected: i64,
+    /// Distinct (session, file) pairs read in the window. The numerator for
+    /// `anatomy_used_rate` (treats every Read attempt against a unique pair as
+    /// "anatomy did its job"; repeats inflate the denominator only).
+    pub unique_session_file_reads: i64,
+    /// `unique_session_file_reads / total_file_reads`. High = the model rarely
+    /// re-reads a file it's already seen in the session (good signal that the
+    /// anatomy injected by pre-read is being respected). `None` when there
+    /// were no reads in the window.
+    pub anatomy_used_rate: Option<f64>,
+    /// Token weight of (session, file) pairs read exactly once in the window —
+    /// the share of read-volume that didn't need a re-read. Uses each pair's
+    /// MAX(token_estimate) so repeated reads of the same file aren't
+    /// double-counted on the denominator side.
+    pub anatomy_token_weight_used: i64,
+    /// Token weight of all distinct (session, file) pairs read in the window.
+    /// Denominator for `anatomy_token_coverage_rate`.
+    pub anatomy_token_weight_total: i64,
+    /// `anatomy_token_weight_used / anatomy_token_weight_total`. Token-weighted
+    /// version of `anatomy_used_rate` — corrects for the case where one big
+    /// file is read many times while many small files are read once and inflate
+    /// the file-count ratio. `None` when no reads have token estimates.
+    pub anatomy_token_coverage_rate: Option<f64>,
     pub estimated_tokens_saveable: i64,
     // Overhead
     pub overhead_tokens: i64,

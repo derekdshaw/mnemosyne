@@ -1052,6 +1052,49 @@ impl MnemosyneServer {
                 )
                 .log_internal("get_analytics:14")?;
 
+            // Anatomy utilization: count distinct (session, file) pairs in the
+            // window, plus a single-pass aggregate that gives both the
+            // single-read token weight and the all-pairs token weight.
+            let unique_pair_reads: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM ( \
+                       SELECT DISTINCT sr.session_id, sr.file_path FROM session_reads sr \
+                       JOIN sessions s ON sr.session_id = s.session_id \
+                       WHERE sr.read_at >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2) \
+                     )",
+                    rusqlite::params_from_iter(&params),
+                    |row| row.get(0),
+                )
+                .log_internal("get_analytics:14a")?;
+
+            let (anatomy_token_weight_used, anatomy_token_weight_total): (i64, i64) = conn
+                .query_row(
+                    "SELECT \
+                       COALESCE(SUM(CASE WHEN read_count = 1 THEN tok ELSE 0 END), 0), \
+                       COALESCE(SUM(tok), 0) \
+                     FROM ( \
+                       SELECT MAX(sr.token_estimate) AS tok, COUNT(*) AS read_count \
+                       FROM session_reads sr \
+                       JOIN sessions s ON sr.session_id = s.session_id \
+                       WHERE sr.read_at >= datetime('now', ?1) AND (?2 = '' OR s.project = ?2) \
+                       GROUP BY sr.session_id, sr.file_path \
+                     )",
+                    rusqlite::params_from_iter(&params),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .log_internal("get_analytics:14b")?;
+
+            let anatomy_used_rate = if total_file_reads > 0 {
+                Some(unique_pair_reads as f64 / total_file_reads as f64)
+            } else {
+                None
+            };
+            let anatomy_token_coverage_rate = if anatomy_token_weight_total > 0 {
+                Some(anatomy_token_weight_used as f64 / anatomy_token_weight_total as f64)
+            } else {
+                None
+            };
+
             // MIN(id) subquery stays global so a re-read inside the window still
             // counts as saveable when its first read happened outside the window.
             let saveable: i64 = conn
@@ -1231,6 +1274,11 @@ impl MnemosyneServer {
                 files_with_anatomy,
                 total_file_reads,
                 repeated_reads_detected: repeated_reads,
+                unique_session_file_reads: unique_pair_reads,
+                anatomy_used_rate,
+                anatomy_token_weight_used,
+                anatomy_token_weight_total,
+                anatomy_token_coverage_rate,
                 estimated_tokens_saveable: saveable,
                 overhead_tokens,
                 overhead_by_hook,
@@ -2325,6 +2373,91 @@ mod tests {
         // the first read, which happens to be outside the window.
         assert_eq!(report.total_file_reads, 1);
         assert_eq!(report.estimated_tokens_saveable, 800);
+    }
+
+    /// Three (session, file) pairs in window:
+    ///   - (s1, a.rs) read once,  500 tokens   → counts toward "anatomy used"
+    ///   - (s1, b.rs) read twice, 1000 tokens  → repeat, NOT counted
+    ///   - (s2, c.rs) read once,  100 tokens   → counts toward "anatomy used"
+    /// Total reads = 4 (1 + 2 + 1). Unique pairs = 3.
+    /// Used token weight = 500 + 100 = 600. Total token weight = 500 + 1000 + 100 = 1600.
+    #[tokio::test]
+    async fn test_get_analytics_anatomy_utilization_metrics() {
+        let server = test_server();
+        {
+            let conn = server.db.lock().unwrap();
+            for sid in ["s1", "s2"] {
+                conn.execute(
+                    "INSERT INTO sessions (session_id, project, start_time, message_count) \
+                     VALUES (?1, 'proj', datetime('now'), 0)",
+                    [sid],
+                )
+                .unwrap();
+            }
+            // (s1, a.rs) — single read
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('s1', 'src/a.rs', datetime('now'), 500)",
+                [],
+            )
+            .unwrap();
+            // (s1, b.rs) — two reads
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('s1', 'src/b.rs', datetime('now'), 1000)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('s1', 'src/b.rs', datetime('now'), 1000)",
+                [],
+            )
+            .unwrap();
+            // (s2, c.rs) — single read in a different session
+            conn.execute(
+                "INSERT INTO session_reads (session_id, file_path, read_at, token_estimate) \
+                 VALUES ('s2', 'src/c.rs', datetime('now'), 100)",
+                [],
+            )
+            .unwrap();
+        }
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: None,
+                days: Some(30),
+                section: Some("tokens".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(report.total_file_reads, 4);
+        assert_eq!(report.unique_session_file_reads, 3);
+        assert_eq!(report.repeated_reads_detected, 1);
+        assert!(matches!(report.anatomy_used_rate, Some(r) if (r - 0.75).abs() < 1e-9));
+        assert_eq!(report.anatomy_token_weight_used, 600);
+        assert_eq!(report.anatomy_token_weight_total, 1600);
+        assert!(
+            matches!(report.anatomy_token_coverage_rate, Some(r) if (r - 0.375).abs() < 1e-9)
+        );
+    }
+
+    /// With no reads in the window, both rates are `None` (no data, not 0/0).
+    #[tokio::test]
+    async fn test_get_analytics_anatomy_utilization_none_when_no_reads() {
+        let server = test_server();
+        let Json(report) = server
+            .get_analytics(Parameters(GetAnalyticsInput {
+                project: None,
+                days: Some(30),
+                section: Some("tokens".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(report.total_file_reads, 0);
+        assert_eq!(report.unique_session_file_reads, 0);
+        assert!(report.anatomy_used_rate.is_none());
+        assert_eq!(report.anatomy_token_weight_total, 0);
+        assert!(report.anatomy_token_coverage_rate.is_none());
     }
 
     // --- Defensive shutdown / timeout tests ---
