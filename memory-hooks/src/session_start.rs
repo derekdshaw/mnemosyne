@@ -17,7 +17,7 @@ type Bug = (
     Option<String>,
 );
 
-pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
+pub fn run(conn: &Connection, input: &HookInput) -> Result<Option<String>> {
     let project = input.project();
 
     // Build project filter params — empty string means "no filter" for Param-style queries,
@@ -89,7 +89,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
 
     // Only print if there's something to show
     if rules.is_empty() && context_items.is_empty() && bugs.is_empty() && total_sessions == 0 {
-        return Ok(0);
+        return Ok(None);
     }
 
     let mut buf = String::new();
@@ -102,7 +102,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
             let scope = format_scope(proj.as_deref(), file_path.as_deref());
             write!(buf, "- {rule}")?;
             if let Some(r) = reason {
-                write!(buf, " — Why: {r}")?;
+                write!(buf, " - Why: {r}")?;
             }
             if !scope.is_empty() {
                 write!(buf, " [{scope}]")?;
@@ -130,7 +130,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
         for (error_msg, root_cause, fix_desc, file_path, _proj) in &bugs {
             let error_short = db::truncate_utf8(error_msg, 100);
             let fix_short = db::truncate_utf8(fix_desc, 100);
-            write!(buf, "- {error_short} → Fix: {fix_short}")?;
+            write!(buf, "- {error_short} -> Fix: {fix_short}")?;
             if let Some(rc) = root_cause {
                 let rc_short = db::truncate_utf8(rc, 80);
                 write!(buf, " (cause: {rc_short})")?;
@@ -148,9 +148,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
     )?;
     writeln!(buf, "---")?;
 
-    let bytes = buf.len();
-    print!("{buf}");
-    Ok(bytes)
+    Ok(if buf.is_empty() { None } else { Some(buf) })
 }
 
 fn format_scope(project: Option<&str>, file_path: Option<&str>) -> String {
@@ -180,8 +178,8 @@ mod tests {
     fn test_session_start_empty_db() {
         let conn = memory_common::db::open_db_in_memory().unwrap();
         // No data — should succeed silently and contribute zero overhead
-        let bytes = run(&conn, &make_input("/Users/me/r/myproject")).unwrap();
-        assert_eq!(bytes, 0, "empty DB should emit no briefing");
+        let out = run(&conn, &make_input("/Users/me/r/myproject")).unwrap();
+        assert!(out.is_none(), "empty DB should emit no briefing");
     }
 
     #[test]
@@ -198,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_session_start_returns_byte_count_matching_output_length() {
+    fn test_session_start_returns_briefing_when_data_present() {
         let conn = memory_common::db::open_db_in_memory().unwrap();
         conn.execute(
             "INSERT INTO do_not_repeat (project, rule, reason, created_at) \
@@ -206,11 +204,12 @@ mod tests {
             [],
         )
         .unwrap();
-        let bytes = run(&conn, &make_input("/Users/me/r/myproject")).unwrap();
-        assert!(bytes > 0, "briefing with data should have non-zero bytes");
-        // The briefing always ends with "---\n"; this guards against returning
-        // a count that doesn't include the trailing newline.
-        assert!(bytes > b"--- Mnemosyne Session Briefing (myproject) ---\n".len());
+        let out = run(&conn, &make_input("/Users/me/r/myproject")).unwrap();
+        let briefing = out.expect("briefing should be present when data exists");
+        assert!(
+            briefing.len() > b"--- Mnemosyne Session Briefing (myproject) ---\n".len(),
+            "briefing should include more than just the header"
+        );
     }
 
     #[test]

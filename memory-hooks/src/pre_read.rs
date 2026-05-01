@@ -7,10 +7,10 @@ use std::fmt::Write as _;
 use crate::HookInput;
 use memory_common::anatomy::Symbol;
 
-pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
+pub fn run(conn: &Connection, input: &HookInput) -> Result<Option<String>> {
     let file_path = match input.file_path() {
         Some(fp) => fp,
-        None => return Ok(0),
+        None => return Ok(None),
     };
     let project = input.project();
     let session_id = input.session_id.as_deref().unwrap_or("");
@@ -38,7 +38,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
             let token_info = tokens
                 .map(|t| format!(" (~{t} tokens)"))
                 .unwrap_or_default();
-            writeln!(buf, "\u{1f4c4} {filename}: {description}{token_info}")?;
+            writeln!(buf, "[anatomy] {filename}: {description}{token_info}")?;
 
             if let Some(json) = symbols_json {
                 if let Some(line) = format_symbols(&json) {
@@ -66,14 +66,12 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
         let ago = humanize_ago(&read_at);
         writeln!(
             buf,
-            "\u{1f6ab} DUPLICATE READ \u{2014} already read {ago} in this session.{token_info} \
+            "[duplicate] DUPLICATE READ - already read {ago} in this session.{token_info} \
              Anatomy above shows available context; only re-read if anatomy is insufficient."
         )?;
     }
 
-    let bytes = buf.len();
-    eprint!("{buf}");
-    Ok(bytes)
+    Ok(if buf.is_empty() { None } else { Some(buf) })
 }
 
 /// Format up to 8 symbols from the JSON-encoded `top_symbols_json` column as
@@ -161,25 +159,25 @@ mod tests {
             [],
         )
         .unwrap();
-        let bytes = run(&conn, &input).unwrap();
+        let out = run(&conn, &input).unwrap();
         assert!(
-            bytes > 0,
-            "duplicate-read warning should contribute bytes of overhead"
+            out.as_ref().is_some_and(|s| !s.is_empty()),
+            "duplicate-read warning should produce content"
         );
     }
 
     #[test]
-    fn test_pre_read_returns_zero_when_no_anatomy_or_duplicate() {
+    fn test_pre_read_returns_none_when_no_anatomy_or_duplicate() {
         let conn = memory_common::db::open_db_in_memory().unwrap();
-        let bytes = run(&conn, &make_input()).unwrap();
-        assert_eq!(
-            bytes, 0,
+        let out = run(&conn, &make_input()).unwrap();
+        assert!(
+            out.is_none(),
             "pre_read with no anatomy cached and no prior read should emit nothing"
         );
     }
 
     #[test]
-    fn test_pre_read_returns_zero_without_file_path() {
+    fn test_pre_read_returns_none_without_file_path() {
         let conn = memory_common::db::open_db_in_memory().unwrap();
         let input = HookInput {
             session_id: Some("test-session".into()),
@@ -188,8 +186,8 @@ mod tests {
             tool_input: None,
             tool_response: None,
         };
-        let bytes = run(&conn, &input).unwrap();
-        assert_eq!(bytes, 0, "no file_path → early return, no overhead");
+        let out = run(&conn, &input).unwrap();
+        assert!(out.is_none(), "no file_path → early return, no content");
     }
 
     #[test]

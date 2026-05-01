@@ -7,10 +7,10 @@ use rusqlite::Connection;
 
 use crate::HookInput;
 
-pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
+pub fn run(conn: &Connection, input: &HookInput) -> Result<Option<String>> {
     let file_path = match input.file_path() {
         Some(fp) => fp,
-        None => return Ok(0),
+        None => return Ok(None),
     };
     let session_id = input.session_id.as_deref().unwrap_or("");
     let project = input.project();
@@ -69,7 +69,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
         )?;
     }
 
-    Ok(0)
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -98,14 +98,11 @@ mod tests {
     }
 
     #[test]
-    fn test_post_read_always_returns_zero_overhead() {
+    fn test_post_read_emits_no_content() {
         // post_read has no user-visible output — it only writes to the DB.
         let conn = memory_common::db::open_db_in_memory().unwrap();
-        let bytes = run(&conn, &make_input()).unwrap();
-        assert_eq!(
-            bytes, 0,
-            "post_read must not contribute overhead (no stdout/stderr)"
-        );
+        let out = run(&conn, &make_input()).unwrap();
+        assert!(out.is_none(), "post_read must not emit any content");
     }
 
     #[test]

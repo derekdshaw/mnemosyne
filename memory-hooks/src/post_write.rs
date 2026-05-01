@@ -5,14 +5,14 @@ use rusqlite::Connection;
 
 use crate::HookInput;
 
-pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
+pub fn run(conn: &Connection, input: &HookInput) -> Result<Option<String>> {
     let file_path = match input.file_path() {
         Some(fp) => fp,
-        None => return Ok(0),
+        None => return Ok(None),
     };
     let project = match input.project() {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Ok(None),
     };
 
     // UPSERT anatomy: single statement instead of UPDATE-check-INSERT
@@ -26,7 +26,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
         rusqlite::params![project, file_path, description],
     )?;
 
-    Ok(0)
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -46,13 +46,10 @@ mod tests {
     }
 
     #[test]
-    fn test_post_write_always_returns_zero_overhead() {
+    fn test_post_write_emits_no_content() {
         let conn = memory_common::db::open_db_in_memory().unwrap();
-        let bytes = run(&conn, &make_input()).unwrap();
-        assert_eq!(
-            bytes, 0,
-            "post_write must not contribute overhead (no stdout/stderr)"
-        );
+        let out = run(&conn, &make_input()).unwrap();
+        assert!(out.is_none(), "post_write must not emit any content");
     }
 
     #[test]

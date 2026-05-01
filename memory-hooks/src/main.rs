@@ -3,7 +3,27 @@
 //!
 //! A single binary with subcommands for each hook type. Spawned by Claude Code
 //! on every file read/write and at session start. All hooks are advisory only —
-//! they write warnings to stderr and always exit 0, never blocking tool execution.
+//! they always exit 0, never blocking tool execution.
+//!
+//! ## I/O policy
+//!
+//! Subcommand `run()` functions are pure: they return `Result<Option<String>>`
+//! (the content to surface to Claude, if any) and never write to stdout/stderr
+//! themselves. The single emit site in `main()` wraps the content per the hook
+//! event protocol Claude Code expects:
+//!
+//! - `PreToolUse` (PreRead, PreWrite): JSON envelope on stdout —
+//!   `{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":...}}`.
+//!   Plain text on stdout shows up only in the transcript view, so the JSON
+//!   envelope is required to actually inject context into the model's view.
+//! - `SessionStart`: plain text on stdout (Claude Code consumes it directly as
+//!   the briefing).
+//! - `PostToolUse` (PostRead, PostWrite): no stdout — these only update the DB.
+//!
+//! Centralizing the formatting here keeps every subcommand on the same I/O
+//! contract and makes it impossible to ship a stream-mismatch regression like
+//! the pre-2026-05-01 `eprint!` bug, where pre_read/pre_write wrote anatomy
+//! warnings to stderr and the model never saw them.
 
 mod post_read;
 mod post_write;
@@ -119,7 +139,8 @@ fn main() {
     };
 
     match result {
-        Ok(bytes) => {
+        Ok(content) => {
+            let bytes = emit(&cli.command, content.as_deref());
             tracing::debug!(bytes, "hook ok");
             if let Err(e) = db::record_overhead(
                 &conn,
@@ -138,4 +159,47 @@ fn main() {
 
     // Always exit 0 — hooks are advisory only
     std::process::exit(0);
+}
+
+/// Write `content` to stdout in the format Claude Code expects for this hook
+/// event. Returns the number of bytes emitted to stdout (used for overhead
+/// accounting). Logs an INFO line on every non-empty emit so the hooks log
+/// shows what reached Claude — silence in the log = the hook produced nothing,
+/// not a stream-mismatch bug.
+fn emit(command: &Command, content: Option<&str>) -> usize {
+    let Some(content) = content.filter(|s| !s.is_empty()) else {
+        return 0;
+    };
+    let payload = match command {
+        Command::PreRead | Command::PreWrite => {
+            // PreToolUse hooks only inject context when stdout is a JSON envelope.
+            // Plain text on stdout would be shown only in transcript-mode and
+            // the model would never see it — see module docs.
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": content,
+                }
+            })
+            .to_string()
+        }
+        Command::SessionStart => content.to_string(),
+        // PostToolUse hooks have no user-visible output by design. If a
+        // subcommand started returning content, we'd silently drop it — log
+        // it loudly so the regression is obvious.
+        Command::PostRead | Command::PostWrite => {
+            tracing::warn!(
+                bytes = content.len(),
+                "post-hook returned content but post hooks emit nothing; dropping"
+            );
+            return 0;
+        }
+    };
+    print!("{payload}");
+    tracing::info!(
+        bytes = payload.len(),
+        stream = "stdout",
+        "emitted hook content"
+    );
+    payload.len()
 }

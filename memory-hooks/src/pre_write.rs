@@ -7,10 +7,10 @@ use std::fmt::Write as _;
 
 use crate::HookInput;
 
-pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
+pub fn run(conn: &Connection, input: &HookInput) -> Result<Option<String>> {
     let file_path = match input.file_path() {
         Some(fp) => fp,
-        None => return Ok(0),
+        None => return Ok(None),
     };
     let project = input.project();
     let filename = file_path.rsplit('/').next().unwrap_or(&file_path);
@@ -38,7 +38,7 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
         let fix_short = truncate_utf8(fix_desc, 100);
         writeln!(
             buf,
-            "\u{1f41b} Known bug on {filename}: {error_short} \u{2014} Fix: {fix_short}"
+            "[bug] Known bug on {filename}: {error_short} - Fix: {fix_short}"
         )?;
     }
 
@@ -62,15 +62,13 @@ pub fn run(conn: &Connection, input: &HookInput) -> Result<usize> {
         for (rule, reason) in &rules {
             let reason_str = reason
                 .as_deref()
-                .map(|r| format!(" \u{2014} Reason: {r}"))
+                .map(|r| format!(" - Reason: {r}"))
                 .unwrap_or_default();
-            writeln!(buf, "\u{1f6ab} Do not: {rule}{reason_str}")?;
+            writeln!(buf, "[rule] Do not: {rule}{reason_str}")?;
         }
     }
 
-    let bytes = buf.len();
-    eprint!("{buf}");
-    Ok(bytes)
+    Ok(if buf.is_empty() { None } else { Some(buf) })
 }
 
 #[cfg(test)]
@@ -104,17 +102,20 @@ mod tests {
              VALUES ('myproject', 'null pointer', 'add null check', 'D:/r/myproject/src/main.rs', datetime('now'))",
             [],
         ).unwrap();
-        let bytes = run(&conn, &make_input()).unwrap();
-        assert!(bytes > 0, "matched-bug warning should contribute overhead");
+        let out = run(&conn, &make_input()).unwrap();
+        assert!(
+            out.as_ref().is_some_and(|s| !s.is_empty()),
+            "matched-bug warning should produce content"
+        );
     }
 
     #[test]
-    fn test_pre_write_returns_zero_when_nothing_matches() {
+    fn test_pre_write_returns_none_when_nothing_matches() {
         let conn = memory_common::db::open_db_in_memory().unwrap();
-        let bytes = run(&conn, &make_input()).unwrap();
-        assert_eq!(
-            bytes, 0,
-            "no bugs and no DNR rules → no stderr emission, no overhead"
+        let out = run(&conn, &make_input()).unwrap();
+        assert!(
+            out.is_none(),
+            "no bugs and no DNR rules → no content emitted"
         );
     }
 }
