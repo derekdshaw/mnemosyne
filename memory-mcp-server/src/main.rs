@@ -2436,9 +2436,7 @@ mod tests {
         assert!(matches!(report.anatomy_used_rate, Some(r) if (r - 0.75).abs() < 1e-9));
         assert_eq!(report.anatomy_token_weight_used, 600);
         assert_eq!(report.anatomy_token_weight_total, 1600);
-        assert!(
-            matches!(report.anatomy_token_coverage_rate, Some(r) if (r - 0.375).abs() < 1e-9)
-        );
+        assert!(matches!(report.anatomy_token_coverage_rate, Some(r) if (r - 0.375).abs() < 1e-9));
     }
 
     /// With no reads in the window, both rates are `None` (no data, not 0/0).
@@ -2481,5 +2479,4 @@ mod tests {
             "unexpected error message: {err_str}"
         );
     }
-
 }

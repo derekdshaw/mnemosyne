@@ -99,8 +99,8 @@ fn setup_pragmas(conn: &Connection) -> Result<()> {
 /// - v3: `top_symbols_json` column on file_anatomy (symbol-line index)
 /// - v4: (no-op bump for tracking)
 /// - v5: re-runs the additive ALTERs because some v4 DBs were stamped before the
-///       v3 column add landed in `run_migrations_unconditionally`. Any DB sitting
-///       at v4 missing `top_symbols_json` re-applies and stamps v5.
+///   v3 column add landed in `run_migrations_unconditionally`. Any DB sitting
+///   at v4 missing `top_symbols_json` re-applies and stamps v5.
 const SCHEMA_VERSION: i64 = 5;
 
 /// Runs schema migrations.
