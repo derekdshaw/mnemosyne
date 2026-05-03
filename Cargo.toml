@@ -8,7 +8,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/derekdshaw/mnemosyne"
@@ -25,7 +25,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.6.1", features = ["derive"] }
 dirs = "6"
 tokio = { version = "1.52", features = ["full"] }
-rmcp = { version = "1.5", features = ["server", "transport-io"] }
+rmcp = { version = "1.6.0", features = ["server", "transport-io"] }
 schemars = "1.2"
 glob = "0.3"
 regex = "1"
